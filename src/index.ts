@@ -13,7 +13,12 @@
  *   (src/provider.ts, ADR-0002);
  * - wires `session_start` / `session_shutdown` to the provider's per-Pi-session
  *   resources so no `vibe-acp` child or bridge socket is orphaned (AGENTS.md
- *   §15).
+ *   §15);
+ * - refuses a `providerName` that collides with any provider Pi already
+ *   registers (the builtin catalog is resolved at runtime from pi-ai's public
+ *   `@earendil-works/pi-ai/providers/all` — see {@link reservedProviderNames})
+ *   and registers nothing in that case, because `registerProvider` REPLACES a
+ *   provider's model list and would shadow it (AGENTS.md §6).
  *
  * Registration timing: Pi's docs (docs/extensions.md, `pi.registerProvider`)
  * state that calls made after the initial extension load take effect
@@ -30,7 +35,8 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
 } from '@earendil-works/pi-coding-agent';
-import { loadConfig, type BridgeConfig } from './config.ts';
+import { getBuiltinProviders } from '@earendil-works/pi-ai/providers/all';
+import { DEFAULT_PROVIDER_NAME, loadConfig, type BridgeConfig } from './config.ts';
 import {
   AcpClientError,
   defaultDebugLogDir,
@@ -69,6 +75,19 @@ export const FALLBACK_MAX_TOKENS = 8_192;
 
 /** Pi's builtin provider name that the bridge must never register or shadow (AGENTS.md §6). */
 export const PI_BUILTIN_MISTRAL_PROVIDER = 'mistral';
+
+/**
+ * Provider names the bridge must never register (AGENTS.md §6):
+ * `pi.registerProvider` REPLACES the named provider's model list, so
+ * registering an already-registered name would shadow it. The ExtensionAPI
+ * has no provider-listing method, so the reserved set is resolved at RUNTIME
+ * from pi-ai's public builtin catalog (`@earendil-works/pi-ai/providers/all`,
+ * a documented package subpath — no private reach-through), plus `mistral`
+ * explicitly in case the catalog ever changes.
+ */
+export function reservedProviderNames(): ReadonlySet<string> {
+  return new Set<string>([...getBuiltinProviders(), PI_BUILTIN_MISTRAL_PROVIDER]);
+}
 
 /** One discovered model: the stable API id, the volatile alias, the display name. */
 export interface DiscoveredModel {
@@ -203,12 +222,15 @@ export function registerMistralProvider(
     deps.onWarn ?? ((message: string) => process.stderr.write(`pi-mistral-bridge: ${message}\n`));
 
   // AGENTS.md §6: the bridge registers only its OWN provider; it must never
-  // shadow Pi's builtin `mistral` provider (registerProvider REPLACES the
-  // model list of the named provider).
-  if (config.providerName === PI_BUILTIN_MISTRAL_PROVIDER) {
+  // shadow any provider Pi already registers (registerProvider REPLACES the
+  // model list of the named provider). The reserved names are Pi's builtin
+  // providers, resolved at runtime (see reservedProviderNames).
+  if (reservedProviderNames().has(config.providerName)) {
     warn(
-      `mistral-bridge.json: "providerName" must not be "${PI_BUILTIN_MISTRAL_PROVIDER}" — the bridge ` +
-        `never registers or shadows a provider it does not own (AGENTS.md §6); nothing registered`
+      `mistral-bridge.json: "providerName" must not be "${config.providerName}" — it collides with a ` +
+        `provider Pi already registers, and the bridge never registers or shadows a provider it does ` +
+        `not own (AGENTS.md §6); nothing was registered. Choose a unique name (default ` +
+        `"${DEFAULT_PROVIDER_NAME}").`
     );
     // Register NOTHING (AGENTS.md §6). The returned provider is an inert
     // placeholder so the caller's lifecycle hooks have a valid object: no

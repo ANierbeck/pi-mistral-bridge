@@ -23,6 +23,7 @@ import {
   FALLBACK_CONTEXT_WINDOW,
   FALLBACK_MAX_TOKENS,
   registerMistralProvider,
+  reservedProviderNames,
 } from '../src/index.ts';
 import { VIBE_ENV } from '../src/vibe-protocol.ts';
 import {
@@ -210,6 +211,35 @@ describe('registerMistralProvider: model discovery + registration (ADR-0005/0007
     } finally {
       await provider.dispose();
     }
+  });
+
+  it('refuses any providerName colliding with a Pi builtin provider, not just mistral (AGENTS.md §6)', async () => {
+    const fake = makeFakeSpawn();
+    const { pi, registrations } = makeFakePi();
+    const warns: string[] = [];
+    const provider = registerMistralProvider(
+      pi,
+      { ...CONFIG, providerName: 'anthropic' },
+      { cwd: CWD, spawnChild: fake.spawnChild, logDir: LOG_DIR, onWarn: (m) => warns.push(m) }
+    );
+    try {
+      await waitFor(() => warns.length === 1, 'collision warning');
+      expect(registrations).toEqual([]); // nothing registered: no shadowing
+      expect(warns[0]).toContain('anthropic');
+      expect(warns[0]).toContain('collides');
+      expect(fake.spawns).toHaveLength(0); // no discovery process needed
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  it('reservedProviderNames covers the Pi builtin catalog incl. mistral, but not the bridge default name', () => {
+    const reserved = reservedProviderNames();
+    expect(reserved.has('mistral')).toBe(true);
+    expect(reserved.has('anthropic')).toBe(true);
+    expect(reserved.has('openai')).toBe(true);
+    expect(reserved.has('google')).toBe(true);
+    expect(reserved.has('mistral-vibe')).toBe(false);
   });
 
   it('kills a hung discovery child after discoveryTimeoutMs and registers nothing', async () => {
