@@ -226,12 +226,12 @@ changing behaviour.
   *controller*: it plans, writes fully specified task briefs, decides,
   reviews and runs the final verification. It does not write production
   code, tests or spike scripts itself.
-- Model choice: implementers run on a cheaper model than the controller —
-  resolve it with `resolve_model_group` (`standard` for normal
-  implementation, `simple` for mechanical steps) or pick the cheaper
-  sibling of the controller's family when a task needs more strength. The
+- Model choice (owner rule 2026-11-24, supersedes hand-pinning):
+  subagents (`worker`, `reviewer`, `scout`) run on the dynamic model
+  router, model ref `router/dynamic`, which picks a model per request.
+  Pin a concrete model only on the owner's explicit request. The
   controller's model is reserved for planning, gating reviews (§1) and the
-  final judgement. Name the model used in the report.
+  final judgement. Name the model ref used in the report.
 - Mechanical steps — gate runs, log scans, searches, bulk reads, applying a
   fully specified edit — go to the cheapest capable worker
   (`worker_step`, `bulk_read`, or a subagent).
