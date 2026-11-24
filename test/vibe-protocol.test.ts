@@ -124,6 +124,19 @@ describe('provider-mode process env (ADR-0006 / ADR-0007)', () => {
       expect(key in env).toBe(false);
     }
   });
+
+  it('omits VIBE_ACTIVE_MODEL / VIBE_ENABLED_TOOLS / VIBE_MCP_SERVERS for a discovery-only process (ADR-0005)', () => {
+    const env = buildProviderProcessEnv({});
+    expect(env[VIBE_ENV.ACTIVE_MODEL]).toBeUndefined();
+    expect(env[VIBE_ENV.ENABLED_TOOLS]).toBeUndefined();
+    expect(env[VIBE_ENV.MCP_SERVERS]).toBeUndefined();
+    // the permission policy stays provider-mode even without a bridge server
+    expect(env[VIBE_ENV.DEFAULT_APPROVAL_POLICY]).toBe(APPROVAL_POLICY_ASK);
+    expect(env[VIBE_ENV.ENABLE_AUTO_APPROVE]).toBe(DISABLE_AUTO_APPROVE);
+    for (const key of NEVER_SET_ENV_KEYS) {
+      expect(key in env).toBe(false);
+    }
+  });
 });
 
 describe('ACP clientInfo (honest identification, AGENTS.md §14)', () => {

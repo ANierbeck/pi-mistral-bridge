@@ -1,19 +1,18 @@
 // Unit tests for src/acp-client.ts (T3). The ACP side is exercised against an
 // IN-PROCESS fake ACP agent over in-memory streams (AGENTS.md §4: no real
-// vibe-acp, no network). The fake agent is built with the SDK's own agent-side
-// app, connected to the fake child's stdio through ndJsonStream — the same wire
-// shape the real vibe-acp speaks.
-import { EventEmitter } from 'node:events';
+// vibe-acp, no network). The fake agent lives in test/helpers/fake-acp-agent.ts
+// and is built with the SDK's own agent-side app, connected to the fake child's
+// stdio through ndJsonStream — the same wire shape the real vibe-acp speaks.
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PassThrough, Readable, Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import * as acp from '@agentclientprotocol/sdk';
 import {
   AcpClientError,
   QUOTA_ERROR_PREFIX,
+  VibeAcpProcess,
   VibeProcessPool,
   bridgeToolRequestName,
   classifyAcpError,
@@ -22,12 +21,9 @@ import {
   type AcpPrompt,
   type AcpSessionEvent,
   type PromptResult,
-  type SpawnChildFn,
-  type VibeChildProcess,
 } from '../src/acp-client.ts';
 import {
   ACP_CLIENT_NAME,
-  MODEL_CONFIG_OPTION_ID,
   NEVER_SET_ENV_KEYS,
   PERMISSION_OPTION_ALLOW_ONCE,
   PERMISSION_OPTION_REJECT_ONCE,
@@ -37,6 +33,15 @@ import {
   VIBE_ENV,
   buildAcpMcpServerEntry,
 } from '../src/vibe-protocol.ts';
+import {
+  makeFakeSpawn,
+  requestPermission,
+  sendUpdate,
+  type FakeAgent,
+  type FakeBehavior,
+  type FakeVibeChild,
+  type PromptScript,
+} from './helpers/fake-acp-agent.ts';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json') as { version: string };
@@ -48,202 +53,6 @@ const MCP_SERVER = {
 };
 
 const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
-
-// ------------------------------------------------------------------ fake child
-
-/** A fake `vibe-acp` child: stdio pipes + an 'exit' event, no real process. */
-class FakeVibeChild extends EventEmitter implements VibeChildProcess {
-  readonly stdin = new PassThrough();
-  readonly stdout = new PassThrough();
-  readonly stderr = new PassThrough();
-  exitCode: number | null = null;
-  signalCode: string | null = null;
-  readonly killedWith: string[] = [];
-
-  kill(signal = 'SIGTERM'): boolean {
-    if (this.exitCode !== null || this.signalCode !== null) return false;
-    this.killedWith.push(signal);
-    const sig = signal as NodeJS.Signals;
-    queueMicrotask(() => {
-      this.signalCode = sig;
-      this.exitCode = sig === 'SIGKILL' ? null : 0;
-      this.emit('exit', this.exitCode, this.signalCode);
-      this.stdout.end();
-      this.stdin.end();
-      this.stderr.end();
-    });
-    return true;
-  }
-
-  /** Simulate an unexpected crash: 'exit' + EOF on the pipes, no kill(). */
-  crash(code = 1): void {
-    if (this.exitCode !== null) return;
-    this.exitCode = code;
-    queueMicrotask(() => {
-      this.emit('exit', code, null);
-      this.stdout.end();
-      this.stdin.end();
-    });
-  }
-}
-
-// ---------------------------------------------------------------- fake agent
-
-type PromptScript = (
-  params: acp.PromptRequest,
-  agent: acp.AgentContext,
-  fake: FakeAgent
-) => Promise<unknown>;
-
-interface FakeAgent {
-  conn: acp.AgentConnection;
-  recorded: Array<{ method: string; params: any }>;
-  permissionRequests: Array<{ params: any; response: any }>;
-  agentCtx: acp.AgentContext | null;
-  close(): void;
-}
-
-interface FakeAgentOptions {
-  child: FakeVibeChild;
-  behavior: FakeBehavior;
-}
-
-interface FakeBehavior {
-  promptScript?: PromptScript | undefined;
-  onCancel?: (() => void) | undefined;
-  /** When set, the fake agent's initialize handler throws (start must not orphan the child). */
-  failInitialize?: boolean | undefined;
-  /** When set, the fake agent's initialize handler awaits this first (lets a test dispose mid-start). */
-  onInitialize?: (() => Promise<void>) | undefined;
-}
-
-function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
-  const { child, behavior } = opts;
-  const recorded: FakeAgent['recorded'] = [];
-  const permissionRequests: FakeAgent['permissionRequests'] = [];
-  const fake: FakeAgent = {
-    conn: null as unknown as acp.AgentConnection,
-    recorded,
-    permissionRequests,
-    agentCtx: null,
-    close: () => fake.conn.close(),
-  };
-  // The agent reads what the client wrote into child.stdin and writes its
-  // answers to child.stdout — exactly the wire a spawned vibe-acp sees.
-  const stream = acp.ndJsonStream(
-    Writable.toWeb(child.stdout) as WritableStream<Uint8Array>,
-    Readable.toWeb(child.stdin) as ReadableStream<Uint8Array>
-  );
-  const app = acp
-    .agent({ name: 'fake-vibe-acp' })
-    .onRequest(acp.AGENT_METHODS.initialize, async ({ params }) => {
-      recorded.push({ method: 'initialize', params });
-      await behavior.onInitialize?.();
-      if (behavior.failInitialize) throw acp.RequestError.internalError('fake initialize failure');
-      return {
-        protocolVersion: acp.PROTOCOL_VERSION,
-        agentCapabilities: {
-          loadSession: false,
-          promptCapabilities: { image: true, audio: false, embeddedContext: true },
-          sessionCapabilities: { list: {}, fork: {}, close: {} },
-        },
-        agentInfo: { name: 'fake-vibe', title: 'Fake Vibe', version: '0.0.0-test' },
-      };
-    })
-    .onRequest(acp.AGENT_METHODS.session_new, async ({ params }) => {
-      recorded.push({ method: 'session/new', params });
-      return {
-        sessionId: 'sess-1',
-        modes: {
-          currentModeId: 'ask',
-          availableModes: [
-            { id: 'ask', name: 'Ask' },
-            { id: 'accept-edits', name: 'Accept edits' },
-          ],
-        },
-        configOptions: [
-          {
-            id: 'mode',
-            category: 'mode',
-            type: 'select',
-            name: 'Mode',
-            currentValue: 'ask',
-            options: [{ value: 'ask', name: 'Ask' }],
-          },
-          {
-            id: MODEL_CONFIG_OPTION_ID,
-            category: 'model',
-            type: 'select',
-            name: 'Model',
-            currentValue: 'devstral-small',
-            options: [
-              {
-                value: 'devstral-small',
-                name: 'Devstral Small',
-                description: 'devstral-small-latest',
-              },
-              {
-                value: 'mistral-medium-3.5',
-                name: 'Mistral Medium 3.5',
-                description: 'mistral-medium-3.5',
-              },
-            ],
-          },
-        ],
-        _meta: { workspace_trust: { status: 'trusted', details: null } },
-      };
-    })
-    .onRequest(acp.AGENT_METHODS.session_prompt, async ({ params, client }) => {
-      recorded.push({ method: 'session/prompt', params });
-      fake.agentCtx = client;
-      if (behavior.promptScript)
-        return (await behavior.promptScript(params, client, fake)) as acp.PromptResponse;
-      return { stopReason: 'end_turn' };
-    })
-    .onRequest(acp.AGENT_METHODS.session_close, async ({ params }) => {
-      recorded.push({ method: 'session/close', params });
-      return {};
-    })
-    .onRequest('*', async ({ method }) => {
-      throw acp.RequestError.methodNotFound(method);
-    })
-    .onNotification(acp.AGENT_METHODS.session_cancel, async ({ params }) => {
-      recorded.push({ method: 'session/cancel', params });
-      behavior.onCancel?.();
-    })
-    .onNotification('*', async () => {
-      // unknown extension notifications must be ignored, not error
-    });
-  fake.conn = app.connect(stream);
-  return fake;
-}
-
-async function sendUpdate(
-  agent: acp.AgentContext,
-  sessionId: string,
-  update: acp.SessionUpdate
-): Promise<void> {
-  await agent.notify(acp.CLIENT_METHODS.session_update, { sessionId, update });
-}
-
-async function requestPermission(
-  fake: FakeAgent,
-  sessionId: string,
-  toolCallId: string
-): Promise<unknown> {
-  const response = await fake.agentCtx!.request(acp.CLIENT_METHODS.session_request_permission, {
-    sessionId,
-    toolCall: { toolCallId },
-    options: [
-      { optionId: PERMISSION_OPTION_ALLOW_ONCE, name: 'Allow once', kind: 'allow_once' },
-      { optionId: 'allow_always', name: 'Allow always', kind: 'allow_always' },
-      { optionId: 'allow_always_permanent', name: 'Allow always', kind: 'allow_always' },
-      { optionId: PERMISSION_OPTION_REJECT_ONCE, name: 'Reject once', kind: 'reject_once' },
-    ],
-  });
-  fake.permissionRequests.push({ params: { sessionId, toolCallId }, response });
-  return response;
-}
 
 // ------------------------------------------------------------------- harness
 
@@ -269,24 +78,14 @@ function makePool(
     logDir?: string;
   } = {}
 ): Harness {
-  const children: FakeVibeChild[] = [];
-  const spawns: Harness['spawns'] = [];
-  const agents: FakeAgent[] = [];
   const anomalies: string[] = [];
-  const behavior: FakeBehavior = {
+  const fake = makeFakeSpawn({
     promptScript: opts.promptScript,
     onCancel: opts.onCancel,
     failInitialize: opts.failInitialize,
     onInitialize: opts.onInitialize,
-  };
+  });
   const logDir = opts.logDir ?? mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-acp-logs-'));
-  const spawnChild: SpawnChildFn = (command, args, env) => {
-    spawns.push({ command, args, env });
-    const child = new FakeVibeChild();
-    children.push(child);
-    agents.push(startFakeAgent({ child, behavior }));
-    return child;
-  };
   const pool = new VibeProcessPool({
     vibeAcpPath: 'vibe-acp',
     processIdleTimeoutMs: opts.processIdleTimeoutMs ?? 600_000,
@@ -294,10 +93,18 @@ function makePool(
     debug: opts.debug ?? false,
     mcpServer: MCP_SERVER,
     logDir,
-    spawnChild,
+    spawnChild: fake.spawnChild,
     onAnomaly: (message) => anomalies.push(message),
   });
-  return { pool, children, spawns, agents, anomalies, behavior, logDir };
+  return {
+    pool,
+    children: fake.children,
+    spawns: fake.spawns,
+    agents: fake.agents,
+    anomalies,
+    behavior: fake.behavior,
+    logDir,
+  };
 }
 
 /** The default fake turn: thinking + two text chunks + a Pi tool call + usage, then end_turn. */
@@ -562,6 +369,42 @@ describe('AcpSession.newSession', () => {
       await h.pool.dispose();
     }
   });
+
+  it('supports a discovery-only process: no alias, no MCP server (ADR-0005)', async () => {
+    const fake = makeFakeSpawn();
+    const logDir = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-acp-logs-'));
+    const proc = await VibeAcpProcess.start({
+      vibeAcpPath: 'vibe-acp',
+      cwd: CWD,
+      abortWatchdogMs: 5_000,
+      debug: false,
+      logDir,
+      spawnChild: fake.spawnChild,
+      logFileBase: 'model-discovery',
+    });
+    try {
+      // no VIBE_ACTIVE_MODEL / VIBE_ENABLED_TOOLS / VIBE_MCP_SERVERS in the child env
+      const env = fake.spawns[0].env;
+      expect(VIBE_ENV.ACTIVE_MODEL in env).toBe(false);
+      expect(VIBE_ENV.ENABLED_TOOLS in env).toBe(false);
+      expect(VIBE_ENV.MCP_SERVERS in env).toBe(false);
+      expect(env[VIBE_ENV.DEFAULT_APPROVAL_POLICY]).toBe('ask');
+      expect(proc.modelLabel).toBe('default');
+
+      const session = await proc.newSession({ cwd: CWD });
+      const newReq = fake.agents[0].recorded.find((r) => r.method === 'session/new');
+      if (!newReq) throw new Error('session/new was not recorded');
+      expect(newReq.params.mcpServers).toEqual([]);
+      // the model list is still offered by the discovery session (ADR-0005/0007)
+      expect(session.modelOptions().map((o) => o.value)).toEqual([
+        'devstral-small',
+        'mistral-medium-3.5',
+      ]);
+      await session.close();
+    } finally {
+      await proc.terminate('test-done');
+    }
+  });
 });
 
 describe('extractModelOptions (pure, T7)', () => {
@@ -808,6 +651,11 @@ describe('isBridgeToolName (server-scoped, ADR-0006)', () => {
   it('normalizes the MCP server name like Vibe does ([^A-Za-z0-9_-] → _)', () => {
     expect(isBridgeToolName('mcp_my_server.pi__x', 'my server')).toBe(true);
     expect(isBridgeToolName('mcp_my_server.pi__x', 'other')).toBe(false);
+  });
+
+  it('rejects every tool name when no bridge server is configured (discovery-only process, ADR-0005)', () => {
+    expect(isBridgeToolName('mcp_pi.pi__echo', undefined)).toBe(false);
+    expect(isBridgeToolName(undefined, undefined)).toBe(false);
   });
 
   it('strips the mcp_<server>. prefix to the MCP request name for the parked call', () => {

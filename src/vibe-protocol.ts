@@ -213,9 +213,19 @@ export function buildVibeMcpServersEnvValue(server: BridgeMcpServer): string {
 }
 
 export interface ProviderProcessEnvParams {
-  /** Model alias for `VIBE_ACTIVE_MODEL`, taken from the session's `model` config option (ADR-0005). */
-  modelAlias: string;
-  mcpServer: BridgeMcpServer;
+  /**
+   * Model alias for `VIBE_ACTIVE_MODEL`, taken from the session's `model`
+   * config option (ADR-0005). Omit for a discovery-only process: Vibe then
+   * runs on its own default model, and the `model` config option of
+   * `session/new` still lists every model (ADR-0005/0007).
+   */
+  modelAlias?: string | undefined;
+  /**
+   * The bridge MCP server of the owning Pi session. Omit for a discovery-only
+   * process: no `VIBE_ENABLED_TOOLS` / `VIBE_MCP_SERVERS` are set and
+   * `session/new` gets `mcpServers: []`, so the process serves no Pi tools.
+   */
+  mcpServer?: BridgeMcpServer | undefined;
 }
 
 /**
@@ -226,15 +236,21 @@ export interface ProviderProcessEnvParams {
  * `VibeAcpProcess.start` (src/acp-client.ts), where the check can actually
  * fire. The bridge layers this over {@link sanitizeInheritedEnv} of the
  * inherited `process.env`, never over the raw environment.
+ *
+ * `VIBE_ACTIVE_MODEL` / `VIBE_ENABLED_TOOLS` / `VIBE_MCP_SERVERS` are only set
+ * when the corresponding param is present (discovery spawns without them).
  */
 export function buildProviderProcessEnv(params: ProviderProcessEnvParams): Record<string, string> {
-  return {
-    [VIBE_ENV.ACTIVE_MODEL]: params.modelAlias,
+  const env: Record<string, string> = {
     [VIBE_ENV.DEFAULT_APPROVAL_POLICY]: APPROVAL_POLICY_ASK,
     [VIBE_ENV.ENABLE_AUTO_APPROVE]: DISABLE_AUTO_APPROVE,
-    [VIBE_ENV.ENABLED_TOOLS]: buildEnabledToolsEnvValue(params.mcpServer.name),
-    [VIBE_ENV.MCP_SERVERS]: buildVibeMcpServersEnvValue(params.mcpServer),
   };
+  if (params.modelAlias !== undefined) env[VIBE_ENV.ACTIVE_MODEL] = params.modelAlias;
+  if (params.mcpServer !== undefined) {
+    env[VIBE_ENV.ENABLED_TOOLS] = buildEnabledToolsEnvValue(params.mcpServer.name);
+    env[VIBE_ENV.MCP_SERVERS] = buildVibeMcpServersEnvValue(params.mcpServer);
+  }
+  return env;
 }
 
 /**

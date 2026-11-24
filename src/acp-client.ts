@@ -290,9 +290,14 @@ function mapUsageUpdate(update: acp.UsageUpdate): {
  * request for a non-bridge toolCallId can therefore only be an anomaly,
  * which the bridge answers `reject_once` and logs (ADR-0006).
  */
-export function isBridgeToolName(toolName: unknown, mcpServerName: string): toolName is string {
+export function isBridgeToolName(
+  toolName: unknown,
+  mcpServerName: string | undefined
+): toolName is string {
   return (
-    typeof toolName === 'string' && toolName.startsWith(buildBridgeToolMetaPrefix(mcpServerName))
+    typeof toolName === 'string' &&
+    mcpServerName !== undefined &&
+    toolName.startsWith(buildBridgeToolMetaPrefix(mcpServerName))
   );
 }
 
@@ -412,7 +417,12 @@ export class AcpPrompt implements AsyncIterable<AcpSessionEvent> {
 
 export interface NewSessionParams {
   cwd: string;
-  mcpServer: BridgeMcpServer;
+  /**
+   * The bridge MCP server of the owning Pi session. Omit for a
+   * discovery-only session (ADR-0005): `session/new` then gets
+   * `mcpServers: []` and the child serves no Pi tools.
+   */
+  mcpServer?: BridgeMcpServer | undefined;
   /** Bridge-facing callback invoked for every parked Pi tool call (ADR-0002). */
   onParkedToolCall?: (call: ParkedToolCall) => void;
 }
@@ -478,7 +488,7 @@ export class AcpSession {
     if (!this.process.alive) {
       throw new AcpClientError(
         'crashed',
-        `vibe-acp for model ${this.process.modelAlias} is dead — respawned on next use; session is dirty (ADR-0003)`
+        `vibe-acp for model ${this.process.modelLabel} is dead — respawned on next use; session is dirty (ADR-0003)`
       );
     }
     if (this.activePrompt) {
@@ -610,7 +620,7 @@ export class AcpSession {
           type: 'tool_call',
           toolCall: {
             toolCallId: update.toolCallId,
-            name: bridgeToolRequestName(toolName, this.process.mcpServerName),
+            name: bridgeToolRequestName(toolName, this.process.mcpServerName ?? ''),
             title: update.title,
             rawInput: update.rawInput,
             rawOutput: update.rawOutput,
@@ -625,7 +635,7 @@ export class AcpSession {
           type: 'tool_call_update',
           toolCall: {
             toolCallId: update.toolCallId,
-            name: bridgeToolRequestName(info.toolName, this.process.mcpServerName),
+            name: bridgeToolRequestName(info.toolName, this.process.mcpServerName ?? ''),
             title: info.title,
             rawInput: update.rawInput !== undefined ? update.rawInput : info.rawInput,
             rawOutput: update.rawOutput !== undefined ? update.rawOutput : undefined,
@@ -659,10 +669,18 @@ function definedOnly(info: ToolCallInfo): Partial<ToolCallInfo> {
 // ----------------------------------------------------------- VibeAcpProcess
 
 export interface VibeAcpProcessOptions {
-  modelAlias: string;
+  /**
+   * Model alias for `VIBE_ACTIVE_MODEL`. Omit for a discovery-only process
+   * (ADR-0005): Vibe runs on its own default model.
+   */
+  modelAlias?: string | undefined;
   vibeAcpPath: string;
   cwd?: string | undefined;
-  mcpServer: BridgeMcpServer;
+  /**
+   * The bridge MCP server of the owning Pi session (env at spawn, ADR-0007).
+   * Omit for a discovery-only process: no Pi tools are served.
+   */
+  mcpServer?: BridgeMcpServer | undefined;
   abortWatchdogMs: number;
   debug: boolean;
   logDir: string;
@@ -688,9 +706,9 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 /** One spawned `vibe-acp` process and its ACP connection. */
 export class VibeAcpProcess {
-  readonly modelAlias: string;
-  /** Name of the bridge MCP server this process was spawned with (env + session/new). */
-  readonly mcpServerName: string;
+  readonly modelAlias: string | undefined;
+  /** Name of the bridge MCP server this process was spawned with, if any. */
+  readonly mcpServerName: string | undefined;
   readonly child: VibeChildProcess;
   readonly abortWatchdogMs: number;
   alive = true;
@@ -711,7 +729,7 @@ export class VibeAcpProcess {
     debugLog: AcpDebugLog | null
   ) {
     this.modelAlias = options.modelAlias;
-    this.mcpServerName = options.mcpServer.name;
+    this.mcpServerName = options.mcpServer?.name;
     this.child = child;
     this.conn = conn;
     this.ctx = conn.agent;
@@ -745,7 +763,11 @@ export class VibeAcpProcess {
     const child = spawnChild(options.vibeAcpPath, [], env, options.cwd);
     try {
       const debugLog = options.debug
-        ? new AcpDebugLog(options.logDir, options.logFileBase, [options.mcpServer.token])
+        ? new AcpDebugLog(
+            options.logDir,
+            options.logFileBase,
+            options.mcpServer ? [options.mcpServer.token] : []
+          )
         : null;
       if (!child.stdin || !child.stdout) {
         throw new AcpClientError('protocol', `${options.vibeAcpPath} did not provide stdio pipes`);
@@ -824,10 +846,15 @@ export class VibeAcpProcess {
     return false;
   }
 
+  /** Display form of {@link modelAlias} for error messages ('default' when unset, ADR-0005). */
+  get modelLabel(): string {
+    return this.modelAlias ?? 'default';
+  }
+
   async newSession(params: NewSessionParams): Promise<AcpSession> {
     const response = await this.request<acp.NewSessionResponse>('session/new', {
       cwd: params.cwd,
-      mcpServers: [buildAcpMcpServerEntry(params.mcpServer)],
+      mcpServers: params.mcpServer ? [buildAcpMcpServerEntry(params.mcpServer)] : [],
     });
     const session = new AcpSession(this, response, params);
     this.sessions.set(response.sessionId, session);
@@ -859,7 +886,7 @@ export class VibeAcpProcess {
     if (!this.alive) {
       return new AcpClientError(
         'crashed',
-        `vibe-acp (model ${this.modelAlias}) exited ${describeExit(this.exitInfo)} — the process is respawned ` +
+        `vibe-acp (model ${this.modelLabel}) exited ${describeExit(this.exitInfo)} — the process is respawned ` +
           `on next use and affected sessions are dirty for rebuild (ADR-0003)`,
         { cause: error }
       );
