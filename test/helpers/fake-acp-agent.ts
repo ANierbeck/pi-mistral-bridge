@@ -89,6 +89,8 @@ export interface FakeAgentOptions {
 export interface FakeBehavior {
   promptScript?: PromptScript | undefined;
   onCancel?: (() => void) | undefined;
+  /** Called when the client sends `session/set_mode` (AskVibe mode switch, ADR-0004). */
+  onSetMode?: ((params: { sessionId: string; modeId: string }) => void) | undefined;
   /** When set, the fake agent's initialize handler throws (start must not orphan the child). */
   failInitialize?: boolean | undefined;
   /** When set, the fake agent's initialize handler awaits this first (lets a test dispose mid-start). */
@@ -109,7 +111,10 @@ export function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
   const { child, behavior } = opts;
   const recorded: FakeAgent['recorded'] = [];
   const permissionRequests: FakeAgent['permissionRequests'] = [];
-  const sessionId = behavior.sessionId ?? 'sess-1';
+  // Unique id per session/new (first stays 'sess-1'): two live sessions on one
+  // process must not collide in the client's session map.
+  let sessionCounter = 0;
+  const nextSessionId = (): string => behavior.sessionId ?? `sess-${++sessionCounter}`;
   const modelOptions = behavior.modelOptions ?? DEFAULT_MODEL_OPTIONS;
   const fake: FakeAgent = {
     conn: null as unknown as acp.AgentConnection,
@@ -144,6 +149,7 @@ export function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
     })
     .onRequest(acp.AGENT_METHODS.session_new, async ({ params }) => {
       recorded.push({ method: 'session/new', params });
+      const sessionId = nextSessionId();
       return {
         sessionId,
         modes: {
@@ -173,6 +179,11 @@ export function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
         ],
         _meta: { workspace_trust: { status: 'trusted', details: null } },
       };
+    })
+    .onRequest(acp.AGENT_METHODS.session_set_mode, async ({ params }) => {
+      recorded.push({ method: 'session/set_mode', params });
+      behavior.onSetMode?.({ sessionId: params.sessionId, modeId: params.modeId });
+      return {};
     })
     .onRequest(acp.AGENT_METHODS.session_prompt, async ({ params, client }) => {
       recorded.push({ method: 'session/prompt', params });

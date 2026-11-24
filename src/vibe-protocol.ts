@@ -15,6 +15,7 @@
  */
 import { createRequire } from 'node:module';
 import type { Implementation, McpServer } from '@agentclientprotocol/sdk';
+import type { AskVibeMode } from './config.ts';
 
 /** The `vibe-acp` version every entry in this module was verified against. */
 export const VIBE_VERSION_VERIFIED = '3.1.4';
@@ -363,6 +364,35 @@ export const UNIFIED_HARNESS_DISCOVERY_TOOL = 'search_tool_functions';
  * future Vibe version fails loudly here.
  */
 export const MODEL_CONFIG_OPTION_ID = 'model';
+
+/**
+ * The `session/new` `configOptions` entry id of the mode select
+ * (`{id:"mode", category:"mode", type:"select", currentValue, options}` —
+ * observed on every `session/new` on 3.1.4, e.g. `currentValue:"ask"`).
+ */
+export const MODE_CONFIG_OPTION_ID = 'mode';
+
+/**
+ * AskVibe mode → Vibe approval-policy id (ADR-0004). On vibe-acp 3.1.4
+ * `session/set_mode` maps 1:1 to the session's approval policy
+ * (`vibe/acp/agent.py:1074-1083` → `session/approvalPolicy/update`; research
+ * doc §"Approval policy vs agent"): `ask`, `plan`, `accept-edits`. The
+ * bridge's `edit` mode is Vibe's `accept-edits` policy — Vibe-internal
+ * auto-approval of edit-type effects in that mode is the sanctioned path
+ * (ADR-0004); the bridge itself still answers every
+ * `session/request_permission` (see src/ask-vibe.ts). The ids are pinned here
+ * so a rename in a future Vibe version fails loudly (AGENTS.md §16).
+ */
+export const ASK_VIBE_MODE_IDS: Readonly<Record<AskVibeMode, string>> = Object.freeze({
+  ask: 'ask',
+  plan: 'plan',
+  edit: 'accept-edits',
+});
+
+/** The Vibe `session/set_mode` modeId for an AskVibe mode (ADR-0004). */
+export function vibeModeIdFor(mode: AskVibeMode): string {
+  return ASK_VIBE_MODE_IDS[mode];
+}
 
 /**
  * The `session/prompt` response `usage` field — an UNSTABLE ACP v1 field that

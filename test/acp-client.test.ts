@@ -944,3 +944,173 @@ describe('debug log (AGENTS.md §15)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------- T6 slice 1
+// AskVibe plumbing (ADR-0004): session/set_mode, all-tool-call event mapping,
+// a per-process permission-handler override, and a pool that can run without
+// an MCP server on Vibe's default model.
+
+describe('AcpSession.setMode (session/set_mode, AskVibe mode switch ADR-0004)', () => {
+  it('sends session/set_mode with {sessionId, modeId} and rejects on a closed session', async () => {
+    const h = makePool();
+    try {
+      const proc = await h.pool.get('devstral-small');
+      const session = await proc.newSession({ cwd: CWD, mcpServer: MCP_SERVER });
+      await session.setMode('accept-edits');
+      const req = h.agents[0].recorded.find((r) => r.method === 'session/set_mode');
+      expect(req?.params).toEqual({ sessionId: 'sess-1', modeId: 'accept-edits' });
+      await session.close();
+      await expect(session.setMode('ask')).rejects.toThrow(/closed/);
+    } finally {
+      await h.pool.dispose();
+    }
+  });
+});
+
+describe('mapAllToolCalls (AskVibe progress rendering, ADR-0004)', () => {
+  const builtinScript: PromptScript = async (params, agent) => {
+    const sessionId = params.sessionId;
+    await sendUpdate(agent, sessionId, {
+      sessionUpdate: 'tool_call',
+      toolCallId: 'b1',
+      title: 'bash',
+      status: 'in_progress',
+      rawInput: { command: 'ls' },
+      _meta: { [TOOL_CALL_META_TOOL_NAME]: 'file_system.bash' },
+    });
+    await sendUpdate(agent, sessionId, {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'b1',
+      status: 'completed',
+      rawOutput: { ok: true },
+    });
+    await sendUpdate(agent, sessionId, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'done' },
+    });
+    return { stopReason: 'end_turn' };
+  };
+
+  it('maps builtin tool_call/tool_call_update events too when enabled, but not by default (provider mode)', async () => {
+    const h = makePool({ promptScript: builtinScript });
+    try {
+      const proc = await h.pool.get('devstral-small');
+      const session = await proc.newSession({
+        cwd: CWD,
+        mcpServer: MCP_SERVER,
+        mapAllToolCalls: true,
+      });
+      const { events, result } = await collect(session.prompt('go'));
+      expect(result.stopReason).toBe('end_turn');
+      expect(events.map((e) => e.type)).toEqual(['tool_call', 'tool_call_update', 'text_delta']);
+      const [toolCall, toolUpdate] = events as any[];
+      expect(toolCall.toolCall).toMatchObject({
+        toolCallId: 'b1',
+        name: 'file_system.bash',
+        title: 'bash',
+        rawInput: { command: 'ls' },
+        status: 'in_progress',
+      });
+      expect(toolUpdate.toolCall.status).toBe('completed');
+      expect(toolUpdate.toolCall.rawOutput).toEqual({ ok: true });
+
+      // default (provider mode): the same builtin updates are NOT mapped (bridge tools only, ADR-0006)
+      const providerSession = await proc.newSession({ cwd: CWD, mcpServer: MCP_SERVER });
+      const { events: providerEvents } = await collect(providerSession.prompt('go again'));
+      expect(providerEvents.map((e) => e.type)).toEqual(['text_delta']);
+    } finally {
+      await h.pool.dispose();
+    }
+  });
+});
+
+describe('custom permission handler (AskVibe ADR-0004 hook on VibeAcpProcess)', () => {
+  it('routes session/request_permission to the process permissionHandler (with session context) instead of the ADR-0006 default', async () => {
+    const fake = makeFakeSpawn({
+      promptScript: async (params, agent, f) => {
+        await sendUpdate(agent, params.sessionId, {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'b1',
+          title: 'write_file',
+          status: 'in_progress',
+          rawInput: { file_path: '/tmp/x.ts' },
+          _meta: { [TOOL_CALL_META_TOOL_NAME]: 'file_system.write' },
+        });
+        await requestPermission(f, params.sessionId, 'b1');
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const logDir = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-acp-logs-'));
+    const seen: Array<{ toolCallId: string; sessionId: string | undefined }> = [];
+    const proc = await VibeAcpProcess.start({
+      vibeAcpPath: 'vibe-acp',
+      cwd: CWD,
+      abortWatchdogMs: 5_000,
+      debug: false,
+      logDir,
+      spawnChild: fake.spawnChild,
+      logFileBase: 'askvibe-test',
+      permissionHandler: (params, p) => {
+        seen.push({
+          toolCallId: params.toolCall.toolCallId,
+          sessionId: p.getSession(params.sessionId)?.sessionId,
+        });
+        return { outcome: { outcome: 'selected', optionId: PERMISSION_OPTION_ALLOW_ONCE } };
+      },
+    });
+    try {
+      const session = await proc.newSession({ cwd: CWD, mapAllToolCalls: true });
+      const { result } = await collect(session.prompt('go'));
+      expect(result.stopReason).toBe('end_turn');
+      expect(seen).toEqual([{ toolCallId: 'b1', sessionId: 'sess-1' }]);
+      expect(fake.agents[0].permissionRequests[0]?.response).toEqual({
+        outcome: { outcome: 'selected', optionId: PERMISSION_OPTION_ALLOW_ONCE },
+      });
+    } finally {
+      await proc.terminate('test-done');
+    }
+  });
+});
+
+describe('VibeProcessPool without an MCP server (AskVibe pool, ADR-0004/0007)', () => {
+  it('spawns children with no VIBE_MCP_SERVERS/VIBE_ENABLED_TOOLS and no VIBE_ACTIVE_MODEL for the default key; default key and alias are separate, reused entries', async () => {
+    const fake = makeFakeSpawn();
+    const logDir = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-acp-logs-'));
+    const pool = new VibeProcessPool({
+      vibeAcpPath: 'vibe-acp',
+      processIdleTimeoutMs: 600_000,
+      abortWatchdogMs: 5_000,
+      debug: false,
+      // no mcpServer key at all: AskVibe sessions get session/new mcpServers: []
+      logDir,
+      spawnChild: fake.spawnChild,
+    });
+    try {
+      const def = await pool.get(undefined); // Vibe's own default model
+      const aliased = await pool.get('devstral-small');
+      expect(pool.size).toBe(2);
+      expect(fake.spawns).toHaveLength(2);
+      // AskVibe children keep the approval-policy env but serve NO Pi tools and
+      // run on Vibe's default model unless an alias is given (ADR-0004/0007)
+      expect(VIBE_ENV.MCP_SERVERS in fake.spawns[0].env).toBe(false);
+      expect(VIBE_ENV.ENABLED_TOOLS in fake.spawns[0].env).toBe(false);
+      expect(VIBE_ENV.ACTIVE_MODEL in fake.spawns[0].env).toBe(false);
+      expect(fake.spawns[0].env[VIBE_ENV.DEFAULT_APPROVAL_POLICY]).toBe('ask');
+      expect(fake.spawns[0].env[VIBE_ENV.ENABLE_AUTO_APPROVE]).toBe('false');
+      expect(fake.spawns[1].env[VIBE_ENV.ACTIVE_MODEL]).toBe('devstral-small');
+      expect(def.modelLabel).toBe('default');
+
+      const session = await def.newSession({ cwd: CWD });
+      const newReq = fake.agents[0].recorded.find((r) => r.method === 'session/new');
+      expect(newReq?.params.mcpServers).toEqual([]);
+      await session.close();
+
+      // the pooled process is reused for the same key (ADR-0007)
+      expect(await pool.get(undefined)).toBe(def);
+      expect(fake.spawns).toHaveLength(2);
+      expect(aliased).not.toBe(def);
+    } finally {
+      await pool.dispose();
+    }
+  });
+});

@@ -419,12 +419,19 @@ export interface NewSessionParams {
   cwd: string;
   /**
    * The bridge MCP server of the owning Pi session. Omit for a
-   * discovery-only session (ADR-0005): `session/new` then gets
+   * discovery-only session (ADR-0005) or an AskVibe session (ADR-0004 —
+   * Vibe runs WITHOUT the Pi MCP server): `session/new` then gets
    * `mcpServers: []` and the child serves no Pi tools.
    */
   mcpServer?: BridgeMcpServer | undefined;
   /** Bridge-facing callback invoked for every parked Pi tool call (ADR-0002). */
   onParkedToolCall?: (call: ParkedToolCall) => void;
+  /**
+   * AskVibe sessions (ADR-0004) map EVERY tool call to an event — Vibe's own
+   * builtins included — so the tool can render progress; provider sessions
+   * only map the bridge's own MCP tools (ADR-0006). Default false.
+   */
+  mapAllToolCalls?: boolean | undefined;
 }
 
 interface ToolCallInfo {
@@ -440,6 +447,7 @@ export class AcpSession {
   readonly configOptions: acp.SessionConfigOption[] | null | undefined;
   private readonly process: VibeAcpProcess;
   private readonly onParkedToolCall: ((call: ParkedToolCall) => void) | undefined;
+  private readonly mapAllToolCalls: boolean;
   private readonly toolCalls = new Map<string, ToolCallInfo>();
   private activePrompt: AcpPrompt | null = null;
   private dirtyFlag = false;
@@ -452,6 +460,7 @@ export class AcpSession {
     this.modes = response.modes;
     this.configOptions = response.configOptions;
     this.onParkedToolCall = params.onParkedToolCall;
+    this.mapAllToolCalls = params.mapAllToolCalls ?? false;
   }
 
   /** True after a crash or a watchdog kill — the next turn must rebuild (ADR-0003). */
@@ -479,6 +488,21 @@ export class AcpSession {
   /** The `model` config options of this session (alias + API model id) for T7. */
   modelOptions(): acp.SessionConfigSelectOption[] {
     return extractModelOptions(this.configOptions);
+  }
+
+  /**
+   * `session/set_mode` (standard ACP; on vibe-acp 3.1.4 it switches the
+   * session's approval policy 1:1 — research doc §"Approval policy vs
+   * agent"). AskVibe uses it to select the requested mode before prompting
+   * (ADR-0004; the mode ids come from `vibeModeIdFor`, src/vibe-protocol.ts).
+   */
+  async setMode(modeId: string): Promise<void> {
+    if (this.closed)
+      throw new AcpClientError('protocol', `ACP session ${this.sessionId} is closed`);
+    await this.process.request(acp.AGENT_METHODS.session_set_mode, {
+      sessionId: this.sessionId,
+      modeId,
+    });
   }
 
   /** Sends `session/prompt`; returns the event stream immediately. */
@@ -613,6 +637,22 @@ export class AcpSession {
       }
       case 'tool_call': {
         const toolName = readToolName(update._meta);
+        if (this.mapAllToolCalls) {
+          // AskVibe session (ADR-0004): every tool call — Vibe's own builtins
+          // included — is surfaced for progress rendering; `name` is the raw
+          // `_meta.tool_name` (e.g. "file_system.bash"), no bridge stripping.
+          return {
+            type: 'tool_call',
+            toolCall: {
+              toolCallId: update.toolCallId,
+              name: typeof toolName === 'string' ? toolName : (update.title ?? ''),
+              title: update.title,
+              rawInput: update.rawInput,
+              rawOutput: update.rawOutput,
+              status: update.status,
+            },
+          };
+        }
         // builtins and the search_tool_functions discovery pseudo-tool are
         // ignored for Pi mapping (they are denied by policy anyway, ADR-0006)
         if (!isBridgeToolName(toolName, this.process.mcpServerName)) return null;
@@ -630,12 +670,19 @@ export class AcpSession {
       }
       case 'tool_call_update': {
         const info = this.toolCalls.get(update.toolCallId);
-        if (!info || !isBridgeToolName(info.toolName, this.process.mcpServerName)) return null;
+        if (!info) return null;
+        if (!this.mapAllToolCalls && !isBridgeToolName(info.toolName, this.process.mcpServerName))
+          return null;
+        const name = this.mapAllToolCalls
+          ? typeof info.toolName === 'string'
+            ? info.toolName
+            : info.title
+          : bridgeToolRequestName(info.toolName as string, this.process.mcpServerName ?? '');
         return {
           type: 'tool_call_update',
           toolCall: {
             toolCallId: update.toolCallId,
-            name: bridgeToolRequestName(info.toolName, this.process.mcpServerName ?? ''),
+            name,
             title: info.title,
             rawInput: update.rawInput !== undefined ? update.rawInput : info.rawInput,
             rawOutput: update.rawOutput !== undefined ? update.rawOutput : undefined,
@@ -694,6 +741,20 @@ export interface VibeAcpProcessOptions {
    * wedged discovery child (no orphan, AGENTS.md §15).
    */
   signal?: AbortSignal | undefined;
+  /**
+   * Custom `session/request_permission` handler (AskVibe mode, ADR-0004:
+   * bridged to Pi's UI / rejected headless / autoApprove opt-in — see
+   * src/ask-vibe.ts). When omitted, the provider-mode ADR-0006 handler runs
+   * (allow_once for bridge MCP tools, reject_once + anomaly otherwise).
+   * May be async (UI dialogs); every request must still be answered — never
+   * left pending (ADR-0006 cancel-hang on Vibe 3.1.4).
+   */
+  permissionHandler?:
+    | ((
+        params: acp.RequestPermissionRequest,
+        proc: VibeAcpProcess
+      ) => acp.RequestPermissionResponse | Promise<acp.RequestPermissionResponse>)
+    | undefined;
 }
 
 function defaultAnomalySink(message: string): void {
@@ -727,6 +788,7 @@ export class VibeAcpProcess {
   private readonly sessions = new Map<string, AcpSession>();
   private readonly debugLog: AcpDebugLog | null;
   private readonly onAnomaly: (message: string) => void;
+  private readonly permissionHandler: VibeAcpProcessOptions['permissionHandler'];
   private exitInfo: { code: number | null; signal: string | null } | null = null;
 
   private constructor(
@@ -743,6 +805,7 @@ export class VibeAcpProcess {
     this.debugLog = debugLog;
     this.abortWatchdogMs = options.abortWatchdogMs;
     this.onAnomaly = options.onAnomaly ?? defaultAnomalySink;
+    this.permissionHandler = options.permissionHandler;
   }
 
   /** Spawns the child, wires the ACP client and performs the `initialize` handshake. */
@@ -883,6 +946,11 @@ export class VibeAcpProcess {
     this.sessions.delete(sessionId);
   }
 
+  /** The session with this id, if any (permission handlers use it for tool-call context). */
+  getSession(sessionId: string): AcpSession | undefined {
+    return this.sessions.get(sessionId);
+  }
+
   async request<Response>(method: string, params?: unknown): Promise<Response> {
     try {
       return await this.ctx.request<Response, unknown>(method, params);
@@ -913,13 +981,24 @@ export class VibeAcpProcess {
   }
 
   /**
-   * ADR-0006 permission bridge: resolve the `toolCallId` to the preceding
-   * `tool_call`; `allow_once` only for the bridge's own MCP tools, otherwise
-   * `reject_once` + anomaly log. Every request is answered immediately —
-   * never left pending (a pending request makes `session/cancel` hang on
-   * Vibe 3.1.4). Never `allow_always` / `allow_always_permanent`.
+   * `session/request_permission` dispatch: a custom {@link permissionHandler}
+   * (AskVibe mode, ADR-0004) wins; otherwise the provider-mode ADR-0006 bridge
+   * below runs. Every request is answered — never left pending (a pending
+   * request makes `session/cancel` hang on Vibe 3.1.4).
    */
   private handlePermissionRequest(
+    params: acp.RequestPermissionRequest
+  ): acp.RequestPermissionResponse | Promise<acp.RequestPermissionResponse> {
+    if (this.permissionHandler) return this.permissionHandler(params, this);
+    return this.providerPermissionRequest(params);
+  }
+
+  /**
+   * ADR-0006 permission bridge: resolve the `toolCallId` to the preceding
+   * `tool_call`; `allow_once` only for the bridge's own MCP tools, otherwise
+   * `reject_once` + anomaly log. Never `allow_always` / `allow_always_permanent`.
+   */
+  private providerPermissionRequest(
     params: acp.RequestPermissionRequest
   ): acp.RequestPermissionResponse {
     const session = this.sessions.get(params.sessionId);
@@ -1008,14 +1087,21 @@ export interface VibeProcessPoolOptions {
   processIdleTimeoutMs: number;
   abortWatchdogMs: number;
   debug: boolean;
-  /** The bridge MCP server of the owning Pi session (env at spawn, ADR-0007). */
-  mcpServer: BridgeMcpServer;
+  /**
+   * The bridge MCP server of the owning Pi session (env at spawn, ADR-0007).
+   * Omit for an AskVibe pool (ADR-0004): the children then serve no Pi tools
+   * (`session/new` gets `mcpServers: []`, no `VIBE_ENABLED_TOOLS` /
+   * `VIBE_MCP_SERVERS`) so Vibe's own builtin tools stay enabled.
+   */
+  mcpServer?: BridgeMcpServer | undefined;
   cwd?: string | undefined;
   /** Debug log dir; defaults to `~/.pi/agent/logs/mistral-bridge/`. */
   logDir?: string;
   /** Test injection: child spawn. Defaults to `node:child_process.spawn`. */
   spawnChild?: SpawnChildFn | undefined;
   onAnomaly?: ((message: string) => void) | undefined;
+  /** Passed to every spawned process; AskVibe pools install the ADR-0004 handler here. */
+  permissionHandler?: VibeAcpProcessOptions['permissionHandler'];
 }
 
 interface PoolEntry {
@@ -1023,6 +1109,12 @@ interface PoolEntry {
   process: VibeAcpProcess;
   idleTimer: NodeJS.Timeout;
 }
+
+/**
+ * Pool key for `get(undefined)` — the process runs on Vibe's own default
+ * model (no `VIBE_ACTIVE_MODEL`), used by the AskVibe pool (ADR-0004/0007).
+ */
+export const DEFAULT_MODEL_POOL_KEY = 'default';
 
 function sanitizeFileBase(alias: string): string {
   return alias.replace(/[^A-Za-z0-9._-]+/g, '_');
@@ -1054,19 +1146,25 @@ export class VibeProcessPool {
     return this.entries.size;
   }
 
-  async get(modelAlias: string): Promise<VibeAcpProcess> {
+  /**
+   * Returns the pooled process for `modelAlias`. `undefined` selects the
+   * {@link DEFAULT_MODEL_POOL_KEY} entry — a process on Vibe's own default
+   * model (no `VIBE_ACTIVE_MODEL`), used by the AskVibe pool (ADR-0004/0007).
+   */
+  async get(modelAlias: string | undefined): Promise<VibeAcpProcess> {
+    const key = modelAlias ?? DEFAULT_MODEL_POOL_KEY;
     if (this.disposed) throw new AcpClientError('protocol', 'VibeProcessPool is disposed');
-    const existing = this.entries.get(modelAlias);
+    const existing = this.entries.get(key);
     if (existing) {
       if (existing.process.alive) {
         this.touch(existing);
         return existing.process;
       }
-      this.drop(modelAlias); // crashed: respawn on next use
+      this.drop(key); // crashed: respawn on next use
     }
-    // Concurrent gets of the same alias share one in-flight spawn, so a
+    // Concurrent gets of the same key share one in-flight spawn, so a
     // racing second `entries.set` can never orphan the first child.
-    const proc = await (this.pending.get(modelAlias) ?? this.startPending(modelAlias));
+    const proc = await (this.pending.get(key) ?? this.startPending(key, modelAlias));
     if (this.disposed) {
       // dispose() ran while the start was in flight: never register into a
       // disposed pool — terminate the fresh child and fail (AGENTS.md §15).
@@ -1075,21 +1173,21 @@ export class VibeProcessPool {
       });
       throw new AcpClientError('protocol', 'VibeProcessPool is disposed');
     }
-    if (this.entries.get(modelAlias)?.process === proc) return proc; // a concurrent get already registered it
+    if (this.entries.get(key)?.process === proc) return proc; // a concurrent get already registered it
     const entry: PoolEntry = {
-      alias: modelAlias,
+      alias: key,
       process: proc,
-      idleTimer: setTimeout(() => this.reap(modelAlias), this.options.processIdleTimeoutMs),
+      idleTimer: setTimeout(() => this.reap(key), this.options.processIdleTimeoutMs),
     };
     proc.onExit = (p): void => {
-      if (this.entries.get(modelAlias)?.process === p) this.drop(modelAlias);
+      if (this.entries.get(key)?.process === p) this.drop(key);
     };
-    this.entries.set(modelAlias, entry);
+    this.entries.set(key, entry);
     return proc;
   }
 
-  /** Starts one spawn for `modelAlias` and records it in {@link pending} until it settles. */
-  private startPending(modelAlias: string): Promise<VibeAcpProcess> {
+  /** Starts one spawn for `key` and records it in {@link pending} until it settles. */
+  private startPending(key: string, modelAlias: string | undefined): Promise<VibeAcpProcess> {
     const p = VibeAcpProcess.start({
       modelAlias,
       vibeAcpPath: this.options.vibeAcpPath,
@@ -1100,11 +1198,12 @@ export class VibeProcessPool {
       logDir: this.options.logDir ?? defaultDebugLogDir(),
       spawnChild: this.options.spawnChild,
       onAnomaly: this.options.onAnomaly,
-      logFileBase: `vibe-acp-${sanitizeFileBase(modelAlias)}-${++this.spawnCounter}`,
+      permissionHandler: this.options.permissionHandler,
+      logFileBase: `vibe-acp-${sanitizeFileBase(key)}-${++this.spawnCounter}`,
     });
-    this.pending.set(modelAlias, p);
+    this.pending.set(key, p);
     const cleanup = (): void => {
-      if (this.pending.get(modelAlias) === p) this.pending.delete(modelAlias);
+      if (this.pending.get(key) === p) this.pending.delete(key);
     };
     p.then(cleanup, cleanup);
     return p;

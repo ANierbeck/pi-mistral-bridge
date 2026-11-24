@@ -24,10 +24,13 @@ import {
   TOOL_CALL_META_EFFECT_KIND,
   TOOL_CALL_META_TOOL_NAME,
   TOOL_CALL_UPDATE_RAW_OUTPUT_APPROVAL,
+  ASK_VIBE_MODE_IDS,
   MCP_DISPLAY_NAME_PREFIX,
+  MODE_CONFIG_OPTION_ID,
   MODEL_CONFIG_OPTION_ID,
   PROMPT_RESPONSE_USAGE,
   UNIFIED_HARNESS_DISCOVERY_TOOL,
+  vibeModeIdFor,
   USAGE_UPDATE_COST,
   USAGE_UPDATE_META,
   VIBE_ENV,
@@ -249,5 +252,21 @@ describe('bridge tool _meta.tool_name prefix (3.1.4 wire form)', () => {
     expect(buildBridgeToolMetaPrefix('my server')).toBe('mcp_my_server.pi__');
     expect(buildMcpDisplayNamePrefix('pi')).toBe('mcp_pi.');
     expect(buildMcpDisplayNamePrefix('my server')).toBe('mcp_my_server.');
+  });
+});
+
+describe('AskVibe mode ids (ADR-0004; Vibe 3.1.4 approval policies)', () => {
+  it('pins the session config option id of the mode select', () => {
+    expect(MODE_CONFIG_OPTION_ID).toBe('mode');
+  });
+
+  it('maps ask/plan/edit to Vibe’s ask/plan/accept-edits policy ids (edit → accept-edits)', () => {
+    // 3.1.4: session/set_mode maps 1:1 to the approval policy
+    // (research doc §a, vibe/acp/agent.py:1074-1083); the ids are Vibe's, pinned
+    // here so a rename in a future Vibe fails loudly (AGENTS.md §16).
+    expect(vibeModeIdFor('ask')).toBe('ask');
+    expect(vibeModeIdFor('plan')).toBe('plan');
+    expect(vibeModeIdFor('edit')).toBe('accept-edits');
+    expect(Object.keys(ASK_VIBE_MODE_IDS).sort()).toEqual(['ask', 'edit', 'plan']);
   });
 });
