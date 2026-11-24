@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-24). Amends ADR-0002 (default provider name).
+Accepted (2026-11-24). Amends ADR-0002 (default provider name).
 
 ## Context
 
