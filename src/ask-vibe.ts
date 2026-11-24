@@ -469,10 +469,12 @@ export class AskVibeManager {
     const index = labels.indexOf(picked);
     const option = index >= 0 ? params.options[index] : undefined;
     if (!option) return { outcome: { outcome: 'cancelled' } };
-    if (option.kind === 'allow_always') {
+    // Persisting grants are refused by kind OR optionId prefix — Vibe must
+    // not slip an allow_always* id past on a mismatched kind.
+    if (option.kind === 'allow_always' || option.optionId.startsWith('allow_always')) {
       this.options.onAnomaly?.(
-        `ask_vibe: downgraded permission option "${option.optionId}" to ${PERMISSION_OPTION_ALLOW_ONCE} — ` +
-          'the bridge never answers persisting grants (allow_always/allow_always_permanent, src/vibe-protocol.ts)'
+        `ask_vibe: downgraded persisting permission option "${option.optionId}" (kind "${option.kind}") to ${PERMISSION_OPTION_ALLOW_ONCE} — ` +
+          'the bridge never answers allow_always* grants (src/vibe-protocol.ts)'
       );
       return allowOnce ? selected(allowOnce) : { outcome: { outcome: 'cancelled' } };
     }

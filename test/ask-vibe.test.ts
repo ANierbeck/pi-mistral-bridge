@@ -725,6 +725,36 @@ describe('ask_vibe edge branches', () => {
     }
   });
 
+  it('persisting permission detected by optionId prefix (allow_always*) even when kind says allow_once → downgraded to allow_once + anomaly, never answered verbatim', async () => {
+    const script: PromptScript = async (params, agent, fake) => {
+      await sendUpdate(agent, params.sessionId, {
+        sessionUpdate: 'tool_call',
+        toolCallId: 't1',
+        title: 't',
+        status: 'pending',
+      });
+      await requestPermissionWith(fake, params.sessionId, 't1', [
+        { optionId: 'allow_always_custom', name: 'Allow always', kind: 'allow_once' },
+        { optionId: PERMISSION_OPTION_ALLOW_ONCE, name: 'Allow once', kind: 'allow_once' },
+        { optionId: PERMISSION_OPTION_REJECT_ONCE, name: 'Reject once', kind: 'reject_once' },
+      ]);
+      return { stopReason: 'end_turn' };
+    };
+    const h = makeHarness({ promptScript: script });
+    try {
+      const ui = makeCtx({ hasUI: true, pick: (o) => o[0] }); // picks 'Allow always'
+      await execAsk(h, { question: 'q' }, { ctx: ui.ctx });
+      expect(h.fake.agents[0].permissionRequests[0]?.response).toEqual({
+        outcome: { outcome: 'selected', optionId: PERMISSION_OPTION_ALLOW_ONCE },
+      });
+      expect(
+        h.anomalies.some((m) => m.includes('downgrad') && m.includes('allow_always_custom'))
+      ).toBe(true);
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+
   it('headless with NO reject_once option answers cancelled (never pending); UI picking an unknown label → cancelled; allow_always without allow_once → cancelled + anomaly', async () => {
     const script: PromptScript = async (params, agent, fake) => {
       await sendUpdate(agent, params.sessionId, {
