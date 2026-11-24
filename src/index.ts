@@ -210,7 +210,9 @@ export function registerMistralProvider(
       `mistral-bridge.json: "providerName" must not be "${PI_BUILTIN_MISTRAL_PROVIDER}" — the bridge ` +
         `never registers or shadows a provider it does not own (AGENTS.md §6); nothing registered`
     );
-    // still wire lifecycle for the (unused) provider instance? No: register nothing at all.
+    // Register NOTHING (AGENTS.md §6). The returned provider is an inert
+    // placeholder so the caller's lifecycle hooks have a valid object: no
+    // discovery spawn, no bridge/pool, no registerProvider call.
     const provider = new MistralProvider({
       config,
       cwd,
@@ -252,7 +254,7 @@ export function registerMistralProvider(
         signal: discoveryAbort.signal,
       });
       if (discovered.length === 0) {
-        throw new Error(`the ${'model'} config option of session/new listed no models`);
+        throw new Error(`the 'model' config option of session/new listed no models`);
       }
       if (provider.isDisposed) return; // disposed during discovery: register nothing
       // cache: API id → alias for the provider's model routing (ADR-0007)

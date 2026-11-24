@@ -416,7 +416,14 @@ export async function createMcpBridge(options: CreateMcpBridgeOptions = {}): Pro
     });
   });
 
-  await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+  // reject on a listen error (e.g. no loopback available) instead of hanging
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once('error', reject);
+    httpServer.listen(0, '127.0.0.1', () => {
+      httpServer.off('error', reject);
+      resolve();
+    });
+  });
   const address = httpServer.address();
   if (!address || typeof address === 'string')
     throw new Error('internal error: no loopback address');

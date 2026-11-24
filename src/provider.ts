@@ -422,7 +422,7 @@ export class MistralProvider {
       if (!live || live.prompt.isSettled || !batch || batch.length === 0) {
         // decideFlow saw a pending batch, but the turn already ended (e.g. the
         // bridge's pre-emptive timeout answered it): rebuild instead of hanging
-        await this.startRebuild(args, bridge, pool, 'parked batch already answered');
+        await this.startRebuild(args, bridge, pool);
         return;
       }
       // attach the new stream to the still-running parked prompt
@@ -461,11 +461,11 @@ export class MistralProvider {
         return;
       }
       // no usable live session (should not happen after decideFlow): rebuild
-      await this.startRebuild(args, bridge, pool, 'delta without a settled live session');
+      await this.startRebuild(args, bridge, pool);
       return;
     }
 
-    await this.startRebuild(args, bridge, pool, decision.reason);
+    await this.startRebuild(args, bridge, pool);
   }
 
   /** Rebuild flow: close the old ACP session, open a new one, prompt = system prompt + transcript. */
@@ -482,8 +482,7 @@ export class MistralProvider {
       decision: FlowDecision;
     },
     bridge: McpBridge,
-    pool: VibeProcessPool,
-    reason: string
+    pool: VibeProcessPool
   ): Promise<void> {
     const { model, context, stream, key, state, modelAlias, systemPrompt, options } = args;
     const existing = this.live.get(key);
@@ -514,9 +513,16 @@ export class MistralProvider {
     state.systemPromptDigest = hashText(systemPrompt);
     const transcript = renderTranscript(context.messages);
     const promptText = systemPrompt ? `${systemPrompt}\n\n${transcript}` : transcript;
-    const prompt = session.prompt(promptText);
+    let prompt: AcpPrompt;
+    try {
+      prompt = session.prompt(promptText);
+    } catch (error) {
+      // never leak the ACP session when the prompt cannot even start
+      // (closed session / dead child): close it before propagating
+      await session.close().catch(() => {});
+      throw error;
+    }
     this.startTurn(key, state, session, prompt, context.messages, stream, model, options?.signal);
-    void reason; // the reason is already logged by the caller's decision; kept for clarity
   }
 
   /** Registers a new (prompt, stream) pair on a live turn and starts its consume loop. */
@@ -709,6 +715,11 @@ export class MistralProvider {
   private onBatch(calls: readonly ParkedCall[]): void {
     const live = [...this.live.values()].find((l) => !l.prompt.isSettled && !l.current.ended);
     if (!live) {
+      // No running prompt to attach the batch to (e.g. a late call after the
+      // batch was already emitted and answered, or after a steering rebuild
+      // released the parked calls). The calls stay parked in the bridge and
+      // are answered by the pre-emptive tool timeout (toolPreTimeoutMs, ~55 s
+      // against Vibe's 60 s per-turn budget, ADR-0006) — never left hanging.
       this.anomaly(`MCP batch of ${calls.length} call(s) with no running ACP prompt — dropped`);
       return;
     }

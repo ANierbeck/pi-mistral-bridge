@@ -158,6 +158,11 @@ export interface SessionKeyOptions {
  * The map key for one Pi session: `options.sessionId` when the agent loop
  * provides it, otherwise a sha256 over the system prompt + the first user
  * message (content-canonical, so regenerated ids/timestamps do not matter).
+ *
+ * Note the fallback key is SHARED: two sessionless callers that start with an
+ * identical system prompt + first user message map to the same entry (and
+ * thus the same ACP session / turn state) — that is intentional, they are
+ * indistinguishable from one session's successive calls.
  */
 export function sessionKey(
   options: SessionKeyOptions | undefined,
