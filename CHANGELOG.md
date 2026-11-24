@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 Semantic Versioning.
 
+## 0.1.1 - 2026-11-24
+
+### Changed
+
+- npm package is published under the scoped name `@anierbeck/pi-mistral-bridge`
+  (the account cannot create unscoped names); install with
+  `pi install npm:@anierbeck/pi-mistral-bridge`. GitHub repository name unchanged.
+- `publishConfig.access` is now pinned to `public` in package.json (scoped
+  packages default to restricted/private, which fails with E402 without it).
+- Releases are published by GitHub Actions (`.github/workflows/publish.yml`,
+  npm Trusted Publishing via OIDC with provenance) on `release: published` or
+  `workflow_dispatch` with a tag ref.
+
+### Fixed
+
+- `prepublishOnly` script contained an unescaped apostrophe that broke
+  `sh -c` parsing on every publish attempt.
+- The commit-range secret scan no longer flags the public npm scope
+  `@anierbeck/` (explicit publication choice); a bare lowercase handle is
+  still rejected.
+
 ## 0.1.0 - 2026-11-24
 
 ### Added
