@@ -73,6 +73,27 @@ real `vibe-acp` only with per-run owner approval (`MISTRAL_BRIDGE_IT=1`).
       modes ask/plan/edit via `set_mode`, permission → `ctx.ui`, headless
       reject, live progress in tool rendering, changed-files summary
       (ADR-0004). Unit tests with mocked `ctx.ui`.
+
+  **Deviations from ADR-0004** (T6 review; flagged for the controller to
+  raise as ADR-0008 at the next ADR round — accepted ADRs are immutable
+  (§12), so this plan records the narrowing instead of editing ADR-0004):
+
+  - Tool params are `question` (required) + `mode` only. ADR-0004's
+    optional `model` and `continue` params are NOT implemented: every call
+    runs on Vibe's own default model (no `VIBE_ACTIVE_MODEL` is set) and
+    always on a fresh ephemeral ACP session — no resume of a previous
+    AskVibe session. Reason: Pi 1.6.0 has no agent-mode API, so AskVibe is
+    a plain Pi tool (ADR-0004 Option 2), and always-ephemeral sessions keep
+    the ADR-0003 delta/rebuild logic untouched (AskVibe uses no session
+    map, so provider-mode histories never mix in).
+  - `mode` is mapped to a Vibe policy id (`vibeModeIdFor`) and validated
+    against the session's advertised `availableModes` before
+    `session/set_mode` (`resolveEffectiveVibeModeId`, src/vibe-protocol.ts):
+    plan mode was removed in vibe-acp 3.0.0 and an unknown mode id is a
+    silent no-op on 3.1.4, so an unavailable request falls back to the
+    closest safe available mode (plan→ask, edit→accept-edits→ask) and the
+    effective mode is recorded in the tool result details — the bridge never
+    reports a mode that was not actually set.
 - [ ] **T7 Models.** `src/models.ts`: read `model` config option, cache by
       API id, background refresh, enrich capabilities from
       `usage_update.size` / Pi registry (no hardcoded models, §9).
