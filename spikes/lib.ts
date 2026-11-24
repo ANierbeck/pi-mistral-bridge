@@ -201,10 +201,15 @@ export interface SpikeSession {
 
 export interface OpenOptions {
   runId: string;
-  /** Extra environment for vibe-acp (names + values are logged, so no secrets here). */
+  /**
+   * Extra environment for vibe-acp (names + values are logged, token redacted). The placeholders
+   * `{{MCP_URL}}` and `{{MCP_TOKEN}}` in a value are replaced with the loopback server's URL / bearer token.
+   */
   vibeEnv: Record<string, string>;
   vibeArgs: string[];
   slowMs: number;
+  /** Send `mcpServers: []` in session/new (the MCP server is then reachable only via env placeholders). */
+  noAcpMcpServers?: boolean;
   /** Optional hook run right after session/new, before the caller continues. */
   afterNewSession?: (s: SpikeSession) => Promise<void>;
 }
@@ -219,10 +224,13 @@ export async function openSession(opts: OpenOptions): Promise<SpikeSession> {
 
   const mcp = await startMcpServer({ token, slowMs: opts.slowMs, log: mcpLog });
 
-  eventLog.write({ ev: "spawn", cmd: "vibe-acp", args: opts.vibeArgs, extraEnvNames: Object.keys(opts.vibeEnv), extraEnv: opts.vibeEnv });
+  const vibeEnv = Object.fromEntries(
+    Object.entries(opts.vibeEnv).map(([k, v]) => [k, v.replaceAll("{{MCP_URL}}", mcp.url).replaceAll("{{MCP_TOKEN}}", token)]),
+  );
+  eventLog.write({ ev: "spawn", cmd: "vibe-acp", args: opts.vibeArgs, extraEnvNames: Object.keys(vibeEnv), extraEnv: vibeEnv });
   const child = spawn("vibe-acp", opts.vibeArgs, {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, ...opts.vibeEnv },
+    env: { ...process.env, ...vibeEnv },
     cwd: WORKTREE_DIR,
   });
   child.stderr.pipe(stderrLog);
@@ -320,14 +328,16 @@ export async function openSession(opts: OpenOptions): Promise<SpikeSession> {
 
     const newSessionResponse = await ctx.request("session/new", {
       cwd: WORKTREE_DIR,
-      mcpServers: [
-        {
-          type: "http",
-          name: "pi",
-          url: mcp.url,
-          headers: [{ name: "Authorization", value: `Bearer ${token}` }],
-        },
-      ],
+      mcpServers: opts.noAcpMcpServers
+        ? []
+        : [
+            {
+              type: "http",
+              name: "pi",
+              url: mcp.url,
+              headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+            },
+          ],
     });
     eventLog.write({ ev: "new_session_response", response: newSessionResponse });
 
