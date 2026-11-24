@@ -11,15 +11,15 @@ export default defineConfig({
       exclude: ['node_modules/**'],
       // Coverage floors per AGENTS.md §4: thresholds are set from the first
       // green real measurement and are NEVER lowered to unblock a run - add
-      // tests instead. T1 ships src/index.ts as a placeholder stub, so the
-      // floors start at 0.
-      // TODO(T3+): raise statements/branches/functions/lines from the first
-      // green measurement of the real implementation and never lower them.
+      // tests instead. Measured 2026-11-24 on the T1-T4 implementation
+      // (94 tests, 5 files): statements 88.74%, branches 78.91%,
+      // functions 86.27%, lines 92.17% - floors are those rounded DOWN to
+      // the integer: 88 / 78 / 86 / 92.
       thresholds: {
-        statements: 0,
-        branches: 0,
-        functions: 0,
-        lines: 0,
+        statements: 88,
+        branches: 78,
+        functions: 86,
+        lines: 92,
       },
     },
   },
