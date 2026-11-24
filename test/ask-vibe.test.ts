@@ -74,21 +74,32 @@ function makeFakePi(): FakePi {
 
 interface FakeUi {
   ctx: ExtensionToolContext;
-  selectCalls: Array<{ title: string; options: string[] }>;
+  selectCalls: Array<{ title: string; options: string[]; opts?: unknown }>;
   pick: (title: string, options: string[]) => Promise<string | undefined>;
 }
 
 function makeCtx(
   opts: {
     hasUI?: boolean;
-    pick?: (options: string[]) => string | undefined;
+    pick?: (options: string[], dialogOpts?: unknown) => string | undefined;
+    /** When set, select hangs until the passed AbortSignal fires (simulates Pi dismissing the dialog on abort). */
+    hangOnSignal?: boolean;
   } = {}
 ): FakeUi {
   const selectCalls: FakeUi['selectCalls'] = [];
   const pick = opts.pick ?? ((options: string[]): string | undefined => options[0]);
-  const select = async (title: string, options: string[]): Promise<string | undefined> => {
-    selectCalls.push({ title, options });
-    return pick(options);
+  const select = async (
+    title: string,
+    options: string[],
+    dialogOpts?: { signal?: AbortSignal }
+  ): Promise<string | undefined> => {
+    selectCalls.push({ title, options, opts: dialogOpts });
+    if (opts.hangOnSignal && dialogOpts?.signal) {
+      return new Promise<string | undefined>((resolve) => {
+        dialogOpts.signal!.addEventListener('abort', () => resolve(undefined), { once: true });
+      });
+    }
+    return pick(options, dialogOpts);
   };
   const hasUI = opts.hasUI ?? false;
   const ctx = {
@@ -519,6 +530,31 @@ describe('ask_vibe permission bridge (ADR-0004: UI select, headless reject, auto
       expect(h.anomalies.some((m) => m.includes('allow_once') && m.includes('downgrad'))).toBe(
         true
       );
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+
+  it('abort during the permission dialog: the call signal is passed to ctx.ui.select (Pi 1.6.0 ExtensionUIDialogOptions) and the request is answered reject_once — never left pending', async () => {
+    const h = makeHarness({ promptScript: permissionScript });
+    try {
+      const controller = new AbortController();
+      const ui = makeCtx({ hasUI: true, hangOnSignal: true }); // dialog only resolves when aborted
+      const resultPromise = execAsk(
+        h,
+        { question: 'do it' },
+        { ctx: ui.ctx, signal: controller.signal }
+      );
+      await waitFor(() => ui.selectCalls.length === 1, 'permission dialog shown');
+      controller.abort();
+      await resultPromise;
+      // the dialog received the call's AbortSignal, so it can never outlive the call
+      expect(ui.selectCalls[0].opts).toMatchObject({ signal: controller.signal });
+      // dismissed BY ABORT → reject_once per ADR-0006 (user dismiss → cancelled)
+      expect(h.fake.agents[0].permissionRequests[0]?.response).toEqual({
+        outcome: { outcome: 'selected', optionId: PERMISSION_OPTION_REJECT_ONCE },
+      });
+      expect(recorded(h, 'session/close')).toHaveLength(1); // session still closed
     } finally {
       await h.manager.dispose();
     }

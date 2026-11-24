@@ -56,7 +56,11 @@
  * via `ctx.ui.select` with Vibe's option labels verbatim plus title and a
  * command/diff preview; without a UI (print mode, subagents) it is rejected,
  * unless the explicit opt-in `askVibe.autoApprove: true` (never the default)
- * answers `allow_once`. Dismissing the dialog answers `cancelled`. The bridge
+ * answers `allow_once`. Dismissing the dialog answers `cancelled`; a dialog
+ * dismissed by the call's abort answers `reject_once` — the call's
+ * `AbortSignal` is passed through to `ctx.ui.select` (Pi 1.6.0
+ * `ExtensionUIDialogOptions`), so a pending dialog can never outlive the
+ * call. The bridge
  * NEVER answers `allow_always` / `allow_always_permanent` (those persist
  * grants into Vibe's config — pinned in src/vibe-protocol.ts): picking one is
  * downgraded to `allow_once` and logged as an anomaly. Every request is
@@ -124,10 +128,10 @@ export interface AskVibeDetails {
   error?: string | undefined;
 }
 
-/** Dialog options passed through to `ctx.ui.select` (Pi ExtensionUIDialogOptions). */
+/** Dialog options passed through to `ctx.ui.select` (Pi ExtensionUIDialogOptions; exactOptionalPropertyTypes-safe). */
 export interface AskVibeSelectOptions {
-  signal?: AbortSignal | undefined;
-  timeout?: number | undefined;
+  signal?: AbortSignal;
+  timeout?: number;
 }
 
 /** Per-call hooks the tool `execute` hands to the manager. */
@@ -439,7 +443,7 @@ export class AskVibeManager {
     const selected = (option: acp.PermissionOption): acp.RequestPermissionResponse => ({
       outcome: { outcome: 'selected', optionId: option.optionId },
     });
-    const { hasUI, select } = this.uiState;
+    const { hasUI, select, signal } = this.uiState;
     if (!hasUI || !select) {
       // headless (print mode / subagents): reject — unless the explicit
       // opt-in flag askVibe.autoApprove is set (ADR-0004)
@@ -448,8 +452,20 @@ export class AskVibeManager {
       return { outcome: { outcome: 'cancelled' } };
     }
     const labels = params.options.map((o) => o.name);
-    const picked = await select(`${title}${permissionPreview(info?.rawInput)}`, labels);
-    if (picked === undefined) return { outcome: { outcome: 'cancelled' } };
+    // The call's AbortSignal is passed through (Pi 1.6.0 ExtensionUIDialogOptions),
+    // so a pending dialog can never outlive the call: on abort Pi dismisses it.
+    // No extra timeout is set — the signal already bounds the dialog to the call.
+    const picked = await select(
+      `${title}${permissionPreview(info?.rawInput)}`,
+      labels,
+      signal ? { signal } : undefined
+    );
+    if (picked === undefined) {
+      // Dismissed BY ABORT (not by the user) → answer reject_once per ADR-0006,
+      // never leave the request pending (the session/cancel hang on Vibe 3.1.4).
+      if (signal?.aborted && rejectOnce) return selected(rejectOnce);
+      return { outcome: { outcome: 'cancelled' } };
+    }
     const index = labels.indexOf(picked);
     const option = index >= 0 ? params.options[index] : undefined;
     if (!option) return { outcome: { outcome: 'cancelled' } };
@@ -518,8 +534,11 @@ export function registerAskVibeTool(
           signal,
           onUpdate,
           hasUI: ctx.hasUI,
+          // opts (signal/timeout, Pi 1.6.0 ExtensionUIDialogOptions) pass
+          // straight through so the dialog is bound to the call's abort
           select: ctx.hasUI
-            ? (title, options): Promise<string | undefined> => ctx.ui.select(title, options)
+            ? (title, options, opts): Promise<string | undefined> =>
+                ctx.ui.select(title, options, opts)
             : undefined,
         }
       );
