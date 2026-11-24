@@ -46,6 +46,7 @@ const CONFIG: BridgeConfig = {
   toolPreTimeoutMs: 1_500,
   abortWatchdogMs: 5_000,
   discoveryTimeoutMs: 30_000,
+  modelRefreshIntervalMs: 600_000,
 };
 
 const MODEL: Model<Api> = {
@@ -420,9 +421,9 @@ describe('AGENTS.md §9: no hardcoded model ids in shipped src', () => {
     expect(hits).toEqual([]);
   });
 
-  it('src/index.ts derives every model from the ACP model config option (pinned id read, nothing hardcoded)', () => {
-    const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf-8');
-    // the model list is read via the pinned config-option id
+  it('src/models.ts derives every model from the ACP model config option (pinned id read, nothing hardcoded)', () => {
+    const source = readFileSync(new URL('../src/models.ts', import.meta.url), 'utf-8');
+    // the model list is read via the pinned config-option accessor
     expect(source).toContain('modelOptions');
   });
 });

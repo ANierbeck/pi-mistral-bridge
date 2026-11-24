@@ -6,6 +6,7 @@ import type { BridgeConfig } from '../src/config.ts';
 import {
   DEFAULT_ABORT_WATCHDOG_MS,
   DEFAULT_DISCOVERY_TIMEOUT_MS,
+  DEFAULT_MODEL_REFRESH_INTERVAL_MS,
   DEFAULT_PROCESS_IDLE_TIMEOUT_MS,
   DEFAULT_PROVIDER_NAME,
   DEFAULT_TOOL_PRE_TIMEOUT_MS,
@@ -58,6 +59,7 @@ describe('config defaults', () => {
     expect(VIBE_TURN_BUDGET_MS).toBe(60_000); // Vibe 3.1.4 hardcoded per-turn budget
     expect(DEFAULT_ABORT_WATCHDOG_MS).toBe(5_000); // T3: kill a hung vibe-acp after session/cancel
     expect(DEFAULT_DISCOVERY_TIMEOUT_MS).toBe(30_000); // T5 C2: kill a hung discovery vibe-acp
+    expect(DEFAULT_MODEL_REFRESH_INTERVAL_MS).toBe(30 * 60 * 1000); // T7: background model-list refresh
   });
 
   it('returns the documented defaults when no config file exists', () => {
@@ -71,6 +73,7 @@ describe('config defaults', () => {
       toolPreTimeoutMs: 55_000,
       abortWatchdogMs: 5_000,
       discoveryTimeoutMs: 30_000,
+      modelRefreshIntervalMs: 1_800_000,
     });
   });
 
@@ -240,6 +243,14 @@ describe('config validation', () => {
     expect(load(cwd, home).discoveryTimeoutMs).toBe(2_500);
     writeProject(cwd, JSON.stringify({ discoveryTimeoutMs: 0 }));
     expect(loadError(cwd, home)).toContain('discoveryTimeoutMs');
+  });
+
+  it('accepts a custom modelRefreshIntervalMs from the project file and rejects a non-positive one', () => {
+    const { home, cwd } = makeSandbox();
+    writeProject(cwd, JSON.stringify({ modelRefreshIntervalMs: 60_000 }));
+    expect(load(cwd, home).modelRefreshIntervalMs).toBe(60_000);
+    writeProject(cwd, JSON.stringify({ modelRefreshIntervalMs: -1 }));
+    expect(loadError(cwd, home)).toContain('modelRefreshIntervalMs');
   });
 
   it('warns (does not crash) on unknown top-level keys and still loads', () => {

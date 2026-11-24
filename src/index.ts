@@ -5,12 +5,14 @@
  * The default export loads the bridge config and calls
  * {@link registerMistralProvider}, which:
  *
- * - discovers the model list from the ACP `model` config option of one
- *   short-lived `vibe-acp` process on Vibe's default model (ADR-0005/0007;
- *   `MODEL_CONFIG_OPTION_ID` via `AcpSession.modelOptions()` — no hardcoded
- *   model ids, AGENTS.md §9) and registers the provider with those models,
- *   cost 0, and the custom `streamSimple` of {@link MistralProvider}
- *   (src/provider.ts, ADR-0002);
+ * - discovers the model list via the {@link ModelCatalog} (src/models.ts,
+ *   T7): one short-lived `vibe-acp` process on Vibe's default model reads the
+ *   ACP `model` config option (ADR-0005/0007 — no hardcoded model ids,
+ *   AGENTS.md §9), and the provider is registered with those models, cost 0,
+ *   and the custom `streamSimple` of {@link MistralProvider}
+ *   (src/provider.ts, ADR-0002); the catalog refreshes the list in the
+ *   background and re-registers the provider with the FULL list on change
+ *   (`registerProvider` REPLACES the list, AGENTS.md §6);
  * - wires `session_start` / `session_shutdown` to the provider's per-Pi-session
  *   resources so no `vibe-acp` child or bridge socket is orphaned (AGENTS.md
  *   §15);
@@ -34,21 +36,21 @@
  * `vibe-acp --setup` if Vibe is not signed in — the bridge never asks for or
  * stores a key, AGENTS.md §14).
  */
-import type {
-  ExtensionAPI,
-  ProviderConfig,
-  ProviderModelConfig,
-} from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-agent';
 import { getBuiltinProviders } from '@earendil-works/pi-ai/providers/all';
 import { DEFAULT_PROVIDER_NAME, loadConfig, type BridgeConfig } from './config.ts';
-import {
-  AcpClientError,
-  defaultDebugLogDir,
-  VibeAcpProcess,
-  type SpawnChildFn,
-} from './acp-client.ts';
+import type { SpawnChildFn } from './acp-client.ts';
 import { MistralProvider } from './provider.ts';
 import { registerAskVibeTool, type AskVibeManager, type RegisterAskVibeDeps } from './ask-vibe.ts';
+import { ModelCatalog, PI_BUILTIN_MISTRAL_PROVIDER } from './models.ts';
+// The capability fallbacks and the reserved builtin provider name live in
+// src/models.ts (T7) next to the catalog that uses them; re-exported here so
+// the entry-point module keeps its stable public surface.
+export {
+  FALLBACK_CONTEXT_WINDOW,
+  FALLBACK_MAX_TOKENS,
+  PI_BUILTIN_MISTRAL_PROVIDER,
+} from './models.ts';
 
 // ------------------------------------------------------------- registration
 
@@ -69,17 +71,11 @@ export const BRIDGE_BASE_URL = 'vibe-acp';
 export const BRIDGE_API_KEY = 'not-used';
 
 /**
- * Conservative capability defaults for a discovered model (ADR-0005): the
- * `model` config option carries no context window / reasoning / image flags
- * (research doc, Decision 3), so until T7 enriches from `usage_update.size`
- * or Pi's own registry, chat models are registered text-only with these
- * documented defaults. Enrichment never admits a model Vibe did not report.
+ * Conservative capability defaults for a discovered model live in
+ * src/models.ts ({@link FALLBACK_CONTEXT_WINDOW} / {@link FALLBACK_MAX_TOKENS},
+ * ADR-0005); the catalog enriches them from the option's extra fields,
+ * `usage_update.size` or Pi's own registry before the provider is registered.
  */
-export const FALLBACK_CONTEXT_WINDOW = 128_000;
-export const FALLBACK_MAX_TOKENS = 8_192;
-
-/** Pi's builtin provider name that the bridge must never register or shadow (AGENTS.md §6). */
-export const PI_BUILTIN_MISTRAL_PROVIDER = 'mistral';
 
 /**
  * Provider names the bridge must never register (AGENTS.md §6):
@@ -92,109 +88,6 @@ export const PI_BUILTIN_MISTRAL_PROVIDER = 'mistral';
  */
 export function reservedProviderNames(): ReadonlySet<string> {
   return new Set<string>([...getBuiltinProviders(), PI_BUILTIN_MISTRAL_PROVIDER]);
-}
-
-/** One discovered model: the stable API id, the volatile alias, the display name. */
-export interface DiscoveredModel {
-  /** The stable upstream API model id (`description` of the `model` option; ADR-0005). */
-  apiId: string;
-  /** The volatile Vibe alias (`value` of the `model` option) — the process-pool key. */
-  alias: string;
-  /** Display name (`name` of the option, falling back to the alias). */
-  name: string;
-}
-
-export interface DiscoverModelsOptions {
-  config: BridgeConfig;
-  cwd: string;
-  spawnChild?: SpawnChildFn | undefined;
-  onAnomaly?: ((message: string) => void) | undefined;
-  logDir?: string | undefined;
-  /**
-   * Abort hook owned by the caller (the provider): when it fires, the
-   * discovery child is killed immediately and discovery rejects. Lets
-   * `dispose()` kill an in-flight discovery (no orphan, AGENTS.md §15).
-   */
-  signal?: AbortSignal | undefined;
-}
-
-/**
- * Reads the model list from one short-lived discovery `vibe-acp` process
- * (ADR-0005): spawned WITHOUT `VIBE_ACTIVE_MODEL` (Vibe's own default model)
- * and without an MCP server, one `session/new`, then the `model` config option
- * via {@link AcpSession.modelOptions} (`MODEL_CONFIG_OPTION_ID`). The process
- * is terminated afterwards — it serves no Pi session. The list is cached
- * in-memory by the caller (the provider's alias map).
- *
- * Bounded: the whole discovery is raced against `config.discoveryTimeoutMs`
- * and the optional `signal`; either one kills the child (via the abort hook
- * in {@link VibeAcpProcess.start}) and rejects with a clear error, so a
- * wedged `vibe-acp` can never hang the extension load or outlive the provider.
- */
-export async function discoverModels(options: DiscoverModelsOptions): Promise<DiscoveredModel[]> {
-  const { config, cwd } = options;
-  const timeoutMs = config.discoveryTimeoutMs;
-  const controller = new AbortController();
-  const onExternalAbort = (): void => controller.abort();
-  if (options.signal) {
-    if (options.signal.aborted) controller.abort();
-    else options.signal.addEventListener('abort', onExternalAbort, { once: true });
-  }
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  timer.unref();
-  try {
-    const proc = await VibeAcpProcess.start({
-      vibeAcpPath: config.vibeAcpPath,
-      cwd,
-      abortWatchdogMs: config.abortWatchdogMs,
-      debug: config.debug,
-      logDir: options.logDir ?? defaultDebugLogDir(),
-      spawnChild: options.spawnChild,
-      onAnomaly: options.onAnomaly,
-      logFileBase: 'model-discovery',
-      signal: controller.signal,
-    });
-    try {
-      const session = await proc.newSession({ cwd });
-      return session.modelOptions().map((option) => ({
-        alias: option.value,
-        apiId:
-          typeof option.description === 'string' && option.description.length > 0
-            ? option.description
-            : option.value,
-        name: option.name ?? option.value,
-      }));
-    } finally {
-      await proc.terminate('model-discovery-done').catch(() => {
-        // already dead
-      });
-    }
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new AcpClientError(
-        'protocol',
-        `model discovery was aborted (provider disposed) or timed out after ${timeoutMs} ms — ` +
-          `the discovery vibe-acp child was killed`
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    if (options.signal) options.signal.removeEventListener('abort', onExternalAbort);
-  }
-}
-
-/** The `ProviderModelConfig` for one discovered model: cost 0 (ADR-0003), conservative capabilities. */
-export function toProviderModel(discovered: DiscoveredModel): ProviderModelConfig {
-  return {
-    id: discovered.apiId,
-    name: discovered.name,
-    input: ['text'],
-    reasoning: false,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: FALLBACK_CONTEXT_WINDOW,
-    maxTokens: FALLBACK_MAX_TOKENS,
-  };
 }
 
 /** Test/deps injection for {@link registerMistralProvider}. */
@@ -264,40 +157,46 @@ export function registerMistralProvider(
     logDir: deps.logDir,
   });
 
-  // Lazy-but-early discovery (ADR-0005): one vibe-acp process on its default
-  // model at extension load, async — the load is not blocked on the spawn.
-  // registerProvider after the initial load takes effect immediately (Pi docs),
-  // so the models appear in the picker as soon as discovery resolves.
-  // The provider OWNS the abort hook: dispose() (session_shutdown) kills the
-  // in-flight discovery child, and the provider is checked for disposal again
-  // right before registerProvider so a disposed provider never registers.
-  const discoveryAbort = new AbortController();
-  provider.onDispose(() => discoveryAbort.abort());
-  void (async (): Promise<void> => {
-    try {
-      const discovered = await discoverModels({
-        config,
-        cwd,
-        spawnChild: deps.spawnChild,
-        onAnomaly: deps.onAnomaly,
-        logDir: deps.logDir,
-        signal: discoveryAbort.signal,
-      });
-      if (discovered.length === 0) {
-        throw new Error(`the 'model' config option of session/new listed no models`);
-      }
+  // The ModelCatalog (src/models.ts, T7, ADR-0005/0007) owns the model list:
+  // one short-lived discovery `vibe-acp` process at extension load (async —
+  // the load is not blocked on the spawn) plus a background refresh timer.
+  // On EVERY change (initial discovery, refresh, runtime capability update)
+  // it publishes the FULL list via onModels and the provider is registered
+  // again — registerProvider REPLACES the model list (AGENTS.md §6), so the
+  // new call always carries the complete list, never a delta. The catalog
+  // also owns the discovery abort: dispose() (session_shutdown) kills an
+  // in-flight discovery child, and onModels re-checks isDisposed so a
+  // disposed provider never registers.
+  const catalog = new ModelCatalog({
+    config,
+    cwd,
+    spawnChild: deps.spawnChild,
+    onAnomaly: deps.onAnomaly,
+    logDir: deps.logDir,
+    onModels: (models, aliasByApiId): void => {
       if (provider.isDisposed) return; // disposed during discovery: register nothing
       // cache: API id → alias for the provider's model routing (ADR-0007)
-      provider.setAliasByApiId(new Map(discovered.map((d) => [d.apiId, d.alias])));
+      provider.setAliasByApiId(aliasByApiId);
       const providerConfig: ProviderConfig = {
         name: config.providerName,
         baseUrl: BRIDGE_BASE_URL,
         apiKey: BRIDGE_API_KEY,
         api: BRIDGE_API,
-        models: discovered.map(toProviderModel),
+        models: [...models],
         streamSimple: (model, context, options) => provider.streamSimple(model, context, options),
       };
       pi.registerProvider(config.providerName, providerConfig);
+    },
+  });
+  provider.onDispose(() => catalog.dispose());
+  catalog.startRefresh();
+
+  // Lazy-but-early discovery (ADR-0005): registerProvider after the initial
+  // load takes effect immediately (Pi docs), so the models appear in the
+  // picker as soon as discovery resolves.
+  void (async (): Promise<void> => {
+    try {
+      await catalog.discover();
     } catch (error) {
       // register NOTHING on failure (an empty models list would replace the
       // provider's list with nothing); the message tells the user what to do

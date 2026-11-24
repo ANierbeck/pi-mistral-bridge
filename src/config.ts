@@ -45,6 +45,12 @@ export const DEFAULT_ABORT_WATCHDOG_MS = 5_000;
  * discovery; `dispose()` aborts it even earlier.
  */
 export const DEFAULT_DISCOVERY_TIMEOUT_MS = 30_000;
+/**
+ * T7 background model-list refresh: the catalog re-runs the discovery against
+ * `vibe-acp` on this interval and re-registers the provider when the list
+ * changed (aliases are volatile, ADR-0007). 30 min default.
+ */
+export const DEFAULT_MODEL_REFRESH_INTERVAL_MS = 30 * 60 * 1_000;
 
 /** AskVibe modes per ADR-0004 (design: `ask` / `plan` / `edit`, default `ask`). */
 export const ASK_VIBE_MODES = ['ask', 'plan', 'edit'] as const;
@@ -65,6 +71,7 @@ export interface BridgeConfig {
   toolPreTimeoutMs: number;
   abortWatchdogMs: number;
   discoveryTimeoutMs: number;
+  modelRefreshIntervalMs: number;
 }
 
 export interface LoadConfigOptions {
@@ -115,6 +122,7 @@ interface ConfigDraft {
   toolPreTimeoutMs?: number;
   abortWatchdogMs?: number;
   discoveryTimeoutMs?: number;
+  modelRefreshIntervalMs?: number;
   askVibe?: Partial<AskVibeConfig>;
 }
 
@@ -168,6 +176,10 @@ function applyLayer(
       }
       case 'discoveryTimeoutMs': {
         draft.discoveryTimeoutMs = requirePositiveMs(path, key, value);
+        break;
+      }
+      case 'modelRefreshIntervalMs': {
+        draft.modelRefreshIntervalMs = requirePositiveMs(path, key, value);
         break;
       }
       case 'toolPreTimeoutMs': {
@@ -261,6 +273,7 @@ export function loadConfig(cwd: string, options: LoadConfigOptions = {}): Bridge
     toolPreTimeoutMs: draft.toolPreTimeoutMs ?? DEFAULT_TOOL_PRE_TIMEOUT_MS,
     abortWatchdogMs: draft.abortWatchdogMs ?? DEFAULT_ABORT_WATCHDOG_MS,
     discoveryTimeoutMs: draft.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
+    modelRefreshIntervalMs: draft.modelRefreshIntervalMs ?? DEFAULT_MODEL_REFRESH_INTERVAL_MS,
   };
   return deepFreeze(config);
 }
