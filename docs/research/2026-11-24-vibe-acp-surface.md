@@ -710,3 +710,139 @@ AGENTS.md §4).
 - The task description attributes "client-neutral markdown" to 3.1.1; the release notes of
   3.1.1 do not say so, the source does (f). `agentWorktrees` is likewise not in the release
   notes; it is in `_connection_protocol.py`.
+
+## Vibe 3.1.4 paid run (2026-11-24)
+
+Stage 3 (`spikes/acp-paid.ts`, one `session/prompt` per process), owner-approved run against
+`vibe-acp` 3.1.4. **Budget: 3/3 prompts used** (`spikes/out/prompt-count.json`; the 2.25.8
+Stage-2 counter was archived to `prompt-count.2-25-8-stage2-archived.json` when this task's
+budget started — nothing deleted). **Model: `devstral-small`**, the smallest Mistral-family
+alias in the `model` config option of `session/new` on 2026-11-24 (options:
+`mistral-large-4-0`, `mistral-medium-latest`, `mistral-medium-3.5`, `devstral-small` plus
+non-Mistral `zai-glm-*`, `deepseek-*`, `local`), selected **only** via
+`VIBE_ACTIVE_MODEL=devstral-small` (every session reported `model.currentValue:"devstral-small"`,
+`usage_update.size:200000`). Process env under test: `VIBE_ACTIVE_MODEL`,
+`VIBE_ENABLE_AUTO_APPROVE=false`, `VIBE_DEFAULT_APPROVAL_POLICY=ask` (session mode stayed `ask`),
+`VIBE_ENABLED_TOOLS=["pi_*","pislow_*"]`, `VIBE_MCP_SERVERS=[{"name":"pislow", streamable-http →
+spike loopback, bearer, "tool_timeout_sec":120}]`; the ACP `session/new` additionally supplied
+the HTTP server `pi` (default timeout). The client answered `session/request_permission` itself:
+`allow_once` only when the referenced `toolCallId` belonged to a `tool_call` whose
+title / `_meta.tool_name` named a spike MCP tool, otherwise `reject_once`.
+
+**Cost:** prompt 1: 150 739 tokens (cachedRead 132 224), $0.0152483; prompt 2: 210 996 tokens
+(cachedRead 205 184), $0.0212932; prompt 3: turn never completed, last `usage_update` $0.0053794.
+Total ≈ 361 735 tokens, ≈ **$0.042**. **`~/.vibe/config.toml`: stat `1795262419 6047`, sha256
+`34f522af…b85d7` — identical before and after every run** (per-run fingerprints in each
+`*-summary.json`; hash only, the file was never read into a log or copied).
+`pgrep -fl vibe-acp` empty after every run. No credentials read; bearer tokens redacted in all
+logs; prompts synthetic.
+
+### Prompt 1 — timeout, one step, two parallel 75 s holds (server `pi` default vs `pislow` 120 s) — **Refuted**
+
+Both calls failed at **exactly 60 000 ms** with error code `tool_timeout`, message
+`mcp_pi.pi__slow_echo ran for the program's whole time budget of 60000 ms and was cancelled.`
+(same for `mcp_pislow.pi__slow_echo`), `retryable:false`. The cap is **not** the per-server MCP
+read timeout: it is the hardcoded program time budget
+`settings.tools.programmatic.max_elapsed_ms = 60_000` that the app server bakes into every
+session (`vibe/app_server/_runtime.py:2226`, `RustToolSettings(...)`); the local harness
+enforces it on provided-tool (MCP) actions and produces exactly this error
+(`mistralai_vibe_local_harness/vibe/_local_actions.py:906-933`, with the source comment that a
+remote MCP handler *keeps running* after the call is cancelled). `tool_timeout_sec:120` on the
+env server therefore never fires — the 60 s budget fires first. The ACP prompt **stayed open**:
+the model re-issued the pair twice more (6 `tools/call` total at t=11032/11036, 91865/91868,
+232001/232005 ms; between rounds it issued `wait` calls; the server-side handlers kept running
+past the client-side cancel — `tool_exec_end` at t≈86035, ~15 s after the cancel at t≈71 s),
+then answered `DONE pi=error pislow=error`; `PromptResponse` `stopReason:"end_turn"` after
+293 986 ms, `usage {totalTokens:150739, inputTokens:149867, outputTokens:872, cachedReadTokens:132224}`;
+final `usage_update {used:19461, size:200000, cost:{amount:0.0152483, currency:"USD"}, _meta:{…,
+cachedTokens:132224}}`. All 6 permission requests (payload only `toolCallId`, preceded by
+`tool_call` title `mcp_pi.`/`mcp_pislow.pi__slow_echo`) were answered `allow_once` and the calls
+ran (`_meta.approval {approvalSource:"user", approvalType:"ask", decision:"execute"}`).
+**Verdict: Refuted** — per-server `tool_timeout_sec` does not extend the effective MCP tool-call
+timeout in ACP sessions on 3.1.4; a hardcoded, non-env-configurable 60 s program budget cancels
+every MCP tool call first, for ACP-supplied and env-configured servers alike. The transport-level
+`mcp_timeout` (60 s default `tool_timeout_sec`) is a second, later layer that never fired here.
+
+### Prompt 2 — ask mode + visibility + parallel batching + builtin attempt — **Confirmed** (one nuance)
+
+Session mode `ask`. The model's final tool list: `read_file, write_file, edit, bash, skill,
+search_tool_functions, run_typescript, wait, mcp_pi.pi__echo, mcp_pi.pi__slow_echo` — **builtin
+definitions remain visible** under `VIBE_ENABLED_TOOLS=["pi_*","pislow_*"]`; only execution is
+blocked. `bash ls` was issued twice and failed with error code `tool_denied`, "Tool execution
+denied by approval policy", `_meta.approval {approvalSource:"never", approvalType:"never",
+decision:"skip"}` — **without any `session/request_permission`** (builtins are denied by policy,
+not by the client). The three `pi__echo` calls ("a","b","c") went out in one step, parallel
+(`tools/call` at t=18412, 18423, 18429 ms), all succeeded after `allow_once`; the model then
+re-issued the same three calls once more (t=24276/24287/24295, also allowed). 6 permission
+requests in total, each carrying only `toolCallId` and mapped via the preceding `tool_call`
+(title `mcp_pi.pi__echo`, `_meta.tool_name`) to a spike tool → `allow_once`; no non-spike request
+ever arrived. Tool-discovery pseudo-steps ("Searching for relevant tools",
+`effect-tool-discovery-*`, modes `all_connector_capabilities`/`best_match`/`details`) ran before
+the calls. `stopReason:"end_turn"` after 27 709 ms; `usage {totalTokens:210996, inputTokens:210028,
+outputTokens:968, cachedReadTokens:205184}`; cost $0.0212932; `usage_update used:20685/size:200000`.
+Nuance: the model's own list did not include `mcp_pislow.*` although those tools were callable
+(prompt 1 called `mcp_pislow.pi__slow_echo` successfully) — the listing is model-driven via the
+discovery tool and incomplete.
+**Verdict: Confirmed** — policy `ask` + the bridge answering `allow_once`/`reject_once` works
+(open item 3), parallel batching works on 3.1.4 (open item 5's naming `mcp_pi.pi__echo` and
+decision 4 carry over), and builtins are denied *without* a permission request but are **not
+hidden** from the model (open item 2: execution denied, definitions visible).
+
+### Prompt 3 — `session/cancel` during a pending approval — **Refuted**
+
+Prompt (call `pi__echo` once) sent 07:42:36.808Z; `tool_call mcp_pi.pi__echo` in_progress
+07:42:42.996; `session/request_permission` (id 0) arrived 07:42:43.001 and was **held
+unanswered**; `session/cancel` sent 07:42:46.005 (3.005 s later); the guard sent a second cancel
+07:44:36.810. Observed: **no agent→client message after the cancel** — no `session/update`, no
+response to `session/prompt` (id 2 never resolved), no `cancelled` outcome for the pending
+permission request; the tool_call stayed `in_progress` and `vibe-acp` stayed alive until it was
+externally killed at ~07:47:23Z (child exit 0 on SIGTERM). Budget was exhausted (3/3), so no
+further prompt; `session/close` was the last message.
+**Verdict: Refuted** — on 3.1.4, `session/cancel` while a `session/request_permission` is pending
+did not end the prompt within ~4 minutes; the turn, the pending request and the tool_call all
+stayed open and the process had to be killed. This contradicts the 3.0.2 release-note
+expectation (`agent.py:1000-1007` source path was not effective here). Bridge implication: **always
+answer `session/request_permission`** — cancel cannot be relied on to unblock it.
+
+### Viability for provider mode (ADR-0002) — viable, with these env-only constraints
+
+All verified without touching `~/.vibe/config.toml` (stat+sha256 identical before/after):
+
+- **Permission policy:** session mode stays `ask` (`VIBE_DEFAULT_APPROVAL_POLICY=ask` +
+  `VIBE_ENABLE_AUTO_APPROVE=false`, so `auto-approve` is not even selectable); the bridge answers
+  every `session/request_permission` itself — `allow_once` only when the referenced `toolCallId`
+  maps to a `tool_call` naming a Pi tool (title / `_meta.tool_name`), `reject_once` otherwise;
+  never `allow_always`/`allow_always_permanent`; **always answer** (prompt 3: cancel does not
+  unblock a pending request).
+- **Allowlist:** `VIBE_ENABLED_TOOLS` globs match the MCP display name `{server}_{tool}`
+  (fnmatch, case-insensitive — `mistralai_vibe_local_harness/vibe/_mcp_models.py:93-114`,
+  `_mcp_naming.py`); for servers `pi` and `pislow` that is `["pi_*","pislow_*"]`. The bridge must
+  spawn `vibe-acp` with globs covering its own MCP server name(s). Result: builtins are denied
+  without a permission request (`tool_denied`, `approvalSource:"never"`) — Vibe's own tools never
+  execute — but their definitions stay visible to the model (harmless: they always fail).
+- **Timeout:** every Pi tool call must complete within **60 s** — hardcoded program time budget
+  (`max_elapsed_ms=60_000`, `vibe/app_server/_runtime.py:2226`), **not raisable** via
+  `tool_timeout_sec` (prompt 1). Long Pi tools are cancelled client-side while the MCP handler
+  keeps running, and the model may retry → **duplicate execution of Pi tools**; the bridge must
+  make Pi tool execution idempotent/duplicate-tolerant or keep calls under 60 s.
+- **Model selection:** `VIBE_ACTIVE_MODEL=<alias>` per process, alias taken from the dynamic
+  `model` config option re-read on every spawn (cheapest Mistral alias observed 2026-11-24:
+  `devstral-small`). NEVER `session/set_config_option` with `configId:"model"` (persists into the
+  user's `config.toml` — still only source-derived, deliberately unrun).
+- **Usage accounting (ADR-0003):** present on 3.1.4 — `PromptResponse.usage {totalTokens,
+  inputTokens, outputTokens, cachedReadTokens}` (omitted when 0) and `usage_update {used, size,
+  cost:{amount,currency}, _meta:{promptTokens, completionTokens, cachedTokens, totalTokens, steps}}`.
+
+### Still unproven after the paid run
+
+- Per-tool `permission:"always"` via `VIBE_TOOLS={"{server}_{tool}": …}` at call time for an
+  ACP-supplied server (open item 4) — unobserved, and unnecessary given the `allow_once` policy works.
+- Whether the 60 s program budget also caps a *single* (non-parallel) MCP call — prompt 1 used
+  parallel pairs; both were capped, so every MCP call observed was capped, but a single-call run
+  was not isolated.
+- The transport-level `mcp_timeout` payload on 3.1.4 (never fired; the program budget fired first).
+- `set_config_option model` persistence (open item 8) — still source-only, deliberately unrun.
+- Any way to hide builtin tool *definitions* from the model (native core) — prompt 2 shows they
+  are visible; no env switch hides them.
+- What ends a pending-approval turn on 3.1.4 besides answering the request, closing the
+  connection or killing the process — `stopReason:"cancelled"` was never observed (prompt 3).
