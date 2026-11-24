@@ -988,6 +988,71 @@ describe('MistralProvider.streamSimple: steering abandons a parked prompt (ADR-0
     }
   });
 
+  it('steering mid-turn: the abandoned consume loop cannot corrupt the session state (the next call deltas)', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        const sessionId = params.sessionId;
+        if (fake.promptCount === 1) {
+          // first prompt parks a tool call; the steering rebuild releases it,
+          // and the abandoned prompt only settles AFTER the new turn is up
+          await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'hi' });
+          const client = await h.mcpClient();
+          await client.callTool({ name: 'pi__echo', arguments: { text: 'hi' } });
+          await sleep(300);
+          return { stopReason: 'end_turn' };
+        }
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `answer ${fake.promptCount}` },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('run tool')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('toolUse');
+
+      // steering while parked -> rebuild on a fresh session
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf([user('run tool'), first.message, user('forget it, do something else')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      expect(second.message.content).toEqual([{ type: 'text', text: 'answer 2' }]);
+      expect(h.sessionNews()).toBe(2);
+
+      // let the abandoned prompt settle (its consume loop finishes late)
+      await sleep(400);
+
+      // the next call must DELTA on the new session (state not corrupted by
+      // the abandoned loop's finishTurn): same session, prompt = new message only
+      const stream3 = h.provider.streamSimple(
+        MODEL,
+        contextOf([
+          user('run tool'),
+          first.message,
+          user('forget it, do something else'),
+          second.message,
+          user('more'),
+        ]),
+        { sessionId: 'pi-1' }
+      );
+      const third = await collectStream(stream3);
+      expect(third.message.stopReason).toBe('stop');
+      expect(third.message.content).toEqual([{ type: 'text', text: 'answer 3' }]);
+      expect(h.sessionNews()).toBe(2); // no extra rebuild
+      expect(h.prompts()).toHaveLength(3); // third prompt on the SAME ACP session
+      expect(h.prompts()[2].params.prompt[0].text).toBe('more'); // delta = new message only
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
   it('model switch while parked: old prompt is cancelled, parked calls released, new model rebuilds on its own process', async () => {
     let released: { isError: boolean | undefined; text: string | undefined } | null = null;
     const h = makeProvider({

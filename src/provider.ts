@@ -583,9 +583,12 @@ export class MistralProvider {
     } catch (error) {
       failure = error;
     }
-    // a stale loop (its prompt was replaced by a newer turn) must not end the
-    // new stream
-    if (live.prompt !== prompt) return;
+    // A stale loop — its LiveTurn was replaced in the map by a newer turn
+    // (steering / model-switch rebuild) — must not finishTurn: it could null
+    // the new turn's pendingToolBatch or overwrite recordSentPrefix. The map
+    // identity is the guard; `live.prompt` is never reassigned on the same
+    // object, so comparing prompts would be dead code.
+    if (this.live.get(live.key) !== live) return;
     this.finishTurn(live, model, outcome, failure);
   }
 
