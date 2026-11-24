@@ -1,0 +1,119 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git tag to publish (e.g. v0.1.0) — must match version in package.json'
+        required: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate ref is a git tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ github.event.inputs.ref }}
+        run: |
+          if ! git tag -l "$TAG" | grep -q .; then
+            echo "Error: '$TAG' is not a git tag"
+            exit 1
+          fi
+          git checkout "$TAG"
+
+      # package.json engines: node >=22.19.0
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript checks
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting (Prettier)
+        run: npm run format:check
+
+      - name: Run tests with coverage
+        run: npm run test:coverage
+
+      - name: Build bundle
+        run: npm run build
+
+      # Same pinned, checksum-verified gitleaks install as the secret-scan
+      # job in ci.yml.
+      - name: Install gitleaks (pinned, checksum-verified)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+
+      - name: Secret-scan the release commit
+        # HEAD is the release commit (tag checked out above; on a release
+        # event the checkout already points at the tag), so HEAD^! scans
+        # exactly the commit being published.
+        run: node scripts/secret-scan.ts --range "HEAD^!" --require-gitleaks
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Switch to release tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ github.event.inputs.ref }}
+        run: git checkout "$TAG"
+
+      - name: Switch to release tag (release event)
+        if: github.event_name == 'release'
+        run: git checkout "${{ github.ref_name }}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          # No scope: pi-mistral-bridge is published unscoped.
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build bundle
+        run: npm run build
+
+      # prepublishOnly (package.json) requires a git tag at HEAD; it passes
+      # here because this job checked out the release tag above.
+      #
+      # Publishing uses npm Trusted Publishing (OIDC, hence id-token: write):
+      # configure it once on npmjs.com for repository
+      # ANierbeck/pi-mistral-bridge, workflow publish.yml, environment
+      # npm-publish (owner step). Fallback without OIDC: drop id-token: write
+      # and set NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} on this step.
+      - name: Publish
+        run: npm publish --provenance --access public
