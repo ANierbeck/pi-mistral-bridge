@@ -564,5 +564,88 @@ describe('MistralProvider.streamSimple: error surfaces', () => {
   });
 });
 
+describe('MistralProvider.streamSimple: turn scope of the bridge de-dup cache (ADR-0006)', () => {
+  it('does not reuse a cached tool result across tool rounds: an identical call in a later round parks again (new turn scope) and gets the new result', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent) => {
+        const sessionId = params.sessionId;
+        const client = await h.mcpClient();
+        // round 1: parks, becomes the Pi toolCall of the first stream
+        await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'same' });
+        const r1 = (await client.callTool({
+          name: 'pi__echo',
+          arguments: { text: 'same' },
+        })) as { content: Array<{ text?: string }> };
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `round1:${r1.content[0].text}` },
+        });
+        // round 2: identical args, but the NEXT Pi tool round — must park again
+        await sendToolCallUpdate(agent, sessionId, 'effect-2', { text: 'same' });
+        const r2 = (await client.callTool({
+          name: 'pi__echo',
+          arguments: { text: 'same' },
+        })) as { content: Array<{ text?: string }> };
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: ` round2:${r2.content[0].text}` },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('go')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('toolUse');
+      const call1 = first.message.content.find((b) => b.type === 'toolCall');
+      if (call1?.type !== 'toolCall') throw new Error('expected a toolCall in round 1');
+      expect(call1.arguments).toEqual({ text: 'same' });
+
+      // Pi answers round 1 -> continueToolResults on the same parked prompt
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf([user('go'), first.message, toolResult(call1.id, 'echo', 'first')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      // the identical repeat in the next tool round must NOT get the cached
+      // 'first' result: it parks again under a new turn scope (new callId)
+      expect(second.message.stopReason).toBe('toolUse');
+      const call2 = second.message.content.find((b) => b.type === 'toolCall');
+      if (call2?.type !== 'toolCall') throw new Error('expected a toolCall in round 2');
+      expect(call2.id).not.toBe(call1.id);
+      expect(call2.arguments).toEqual({ text: 'same' });
+      // the round-1 continuation text streamed into the second message
+      expect(
+        second.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+      ).toContain('round1:first');
+      expect(h.prompts()).toHaveLength(1); // still the same parked ACP prompt
+
+      const stream3 = h.provider.streamSimple(
+        MODEL,
+        contextOf([
+          user('go'),
+          first.message,
+          toolResult(call1.id, 'echo', 'first'),
+          second.message,
+          toolResult(call2.id, 'echo', 'second'),
+        ]),
+        { sessionId: 'pi-1' }
+      );
+      const third = await collectStream(stream3);
+      expect(third.message.stopReason).toBe('stop');
+      const text = third.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      expect(text).toContain('round2:second'); // not the cached 'first'
+      expect(text).not.toContain('round2:first');
+      expect(h.sessionNews()).toBe(1);
+      expect(h.prompts()).toHaveLength(1);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+});
+
 // keep the import used for the stream type in helpers
 void createAssistantMessageEventStream;

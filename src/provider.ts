@@ -375,6 +375,12 @@ export class MistralProvider {
         .map((r) => toBridgeResult(batch, r))
         .filter((r): r is BridgeToolResult => r !== null);
       bridge.deliverResults(results);
+      // New turn scope for the de-dup cache (ADR-0006): a call identical to one
+      // of the answered calls must park again in this round and get the fresh
+      // result, never the cached one. The turn number is part of the callId
+      // hash, so callIds stay unique; repeats INSIDE one round still de-dup.
+      // This also bounds the resolvedCache (no per-result retention forever).
+      bridge.newTurn();
       return; // the existing consume loop finishes this stream
     }
 
