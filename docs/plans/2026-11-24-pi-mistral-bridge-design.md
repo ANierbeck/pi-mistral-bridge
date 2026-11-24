@@ -2,9 +2,11 @@
 
 ## Status
 
-Approved (2026-11-24) — design agreed with the owner in the brainstorming
-session. ADR-0001 … ADR-0005 accepted by the owner (2026-11-24).
-Next step: spike (step 1 below).
+Approved (2026-11-24). ADRs 0001–0007 accepted by the owner (2026-11-24).
+Spike done: `docs/research/2026-11-24-vibe-acp-surface.md`; open decisions 1–5
+answered, ADR-0006/0007 record the two design changes the evidence forced
+(permission bridge + 60 s effect budget; one process per model, env config).
+Next step: implementation plan `2026-11-24-implementation.md`.
 
 ## Problem
 
@@ -124,20 +126,16 @@ session files; any direct Mistral API access.
 - [ ] 6. AskVibe + permission bridge.
 - [ ] 7. README, review (AGENTS.md §1), owner decision on publishing.
 
-## Open decisions (resolved by the spike unless marked owner)
+## Open decisions — resolved by the spike (docs/research/2026-11-24-vibe-acp-surface.md)
 
-1. How are Vibe's builtin tools disabled per ACP session (session mode,
-   agent profile, tool filter)? Does a provider-mode session ever raise a
-   permission request?
-2. Does `vibe-acp` connect to an HTTP MCP server, or must the bridge offer a
-   stdio shim?
-3. Is the model list exposed as a session config option, and with which
-   metadata?
-4. How does Vibe issue multiple tool calls in one model step (parallel MCP
-   requests? sequential?) — determines the batching window.
-5. Is Vibe's internal system prompt replaceable or only extendable, and how
-   do Pi's system prompt and Vibe's coexist?
-6. **Owner:** repository name/visibility on GitHub and whether to publish to
+1. Builtin tools: no per-session switch; process env `VIBE_ENABLED_TOOLS` gates execution, definitions stay visible → ADR-0006.
+2. HTTP MCP works (bearer, stateless per-call sessions) → confirmed.
+3. Model list comes from the ACP `model` config option; aliases volatile, API id in `description` is the stable key → ADR-0007.
+4. Tool calls in one step arrive in parallel within ~15 ms → batch with a ~100 ms quiet window.
+5. System prompt is only extendable (prompt text), Vibe's own stays → as designed in ADR-0003.
+6. **Owner:** repository name/visibility on GitHub and whether to publish to npm (later, AGENTS.md §1).
+
+New from the spike: hard 60 s per-turn effect budget (ADR-0006), cancel during pending approval hangs (bridge must always answer), duplicate execution on retry must be tolerated.
    npm (later, AGENTS.md §1).
 
 ## Verified against
@@ -152,4 +150,4 @@ session files; any direct Mistral API access.
   session sync) and README.
 - Mistral announcement (r/MistralAI official post "[Vibe Update] Vibe
   Allowance Changes") and Mistral docs "Use Vibe in other IDEs".
-- Not yet verified: everything under "Open decisions".
+- Verified against vibe-acp 2.25.8 and 3.1.4 (see research doc); remaining paid-run gaps are listed there under "still unproven".
