@@ -101,6 +101,14 @@ export interface MistralProviderOptions {
   createBridge?: ((options: CreateMcpBridgeOptions) => Promise<McpBridge>) | undefined;
   /** Extra bridge options (batch window / pre-timeout); defaults from `config`. */
   bridgeOptions?: Partial<CreateMcpBridgeOptions> | undefined;
+  /**
+   * Runtime capability observation (T7, ADR-0005): called with the API model
+   * id and `usage_update.size` (the active model's context window) whenever a
+   * provider session reports one. The model catalog caches it per API id and
+   * re-registers the provider when a registered model's contextWindow changed
+   * (src/models.ts `noteContextSize`).
+   */
+  onUsageContextSize?: ((apiId: string, contextSize: number) => void) | undefined;
 }
 
 /** The Pi-side view of one in-flight `streamSimple` call. */
@@ -246,12 +254,24 @@ export class MistralProvider {
     this.aliasByApiId = aliasByApiId;
   }
 
-  /** The Vibe model alias for a Pi model (pool key, ADR-0007). */
-  modelAliasFor(model: Model<Api>): string {
-    const id = model.id;
+  /**
+   * The stable API model id of a Pi model: the registered id with the
+   * `<provider>/` prefix stripped (ADR-0007: Pi model ids are
+   * `<providerName>/<api id>`; the API id is the catalog/cache key).
+   */
+  modelApiIdFor(model: Model<Api>): string {
     const prefix = `${model.provider}/`;
-    const apiId = id.startsWith(prefix) ? id.slice(prefix.length) : id;
-    return this.aliasByApiId.get(apiId) ?? this.aliasByApiId.get(id) ?? apiId;
+    return model.id.startsWith(prefix) ? model.id.slice(prefix.length) : model.id;
+  }
+
+  /**
+   * The Vibe model alias for a Pi model (pool key, ADR-0007): looked up in
+   * the alias map by API id, so a volatile alias change between discoveries
+   * re-routes existing Pi models without changing their ids.
+   */
+  modelAliasFor(model: Model<Api>): string {
+    const apiId = this.modelApiIdFor(model);
+    return this.aliasByApiId.get(apiId) ?? this.aliasByApiId.get(model.id) ?? apiId;
   }
 
   // ------------------------------------------------------------ resources
@@ -448,7 +468,7 @@ export class MistralProvider {
       // replay the events that arrived while the old turn was already parked:
       // they belong to this still-running prompt and must land in the new
       // stream (the old turn's delivered message is never touched again)
-      for (const event of live.pendingEvents.splice(0)) this.handleAcpEvent(live, event);
+      for (const event of live.pendingEvents.splice(0)) this.handleAcpEvent(live, event, model);
       this.attachAbort(live, state, signal);
       const results = decision.results
         .map((r) => toBridgeResult(batch, r))
@@ -613,7 +633,7 @@ export class MistralProvider {
     let outcome: PromptResult | null = null;
     let failure: unknown = null;
     try {
-      for await (const event of prompt) this.handleAcpEvent(live, event);
+      for await (const event of prompt) this.handleAcpEvent(live, event, model);
       outcome = await prompt.result();
     } catch (error) {
       failure = error;
@@ -627,7 +647,7 @@ export class MistralProvider {
     this.finishTurn(live, model, outcome, failure);
   }
 
-  private handleAcpEvent(live: LiveTurn, event: AcpSessionEvent): void {
+  private handleAcpEvent(live: LiveTurn, event: AcpSessionEvent, model: Model<Api>): void {
     const turn = live.current;
     if (turn.ended) {
       // The terminal event (toolUse park / done / error) was already pushed:
@@ -681,6 +701,12 @@ export class MistralProvider {
       }
       case 'usage': {
         turn.message.usage = event.usage; // cost already forced to 0 (ADR-0003)
+        // `usage_update.size` is the active model's context window (ADR-0005
+        // capability source): feed it to the model catalog, cached per API id
+        // (T7, src/models.ts noteContextSize)
+        if (event.contextSize !== undefined) {
+          this.options.onUsageContextSize?.(this.modelApiIdFor(model), event.contextSize);
+        }
         return;
       }
       default:

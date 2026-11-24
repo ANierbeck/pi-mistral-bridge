@@ -10,7 +10,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
-import type { ProviderModelConfig } from '@earendil-works/pi-coding-agent';
+import type * as acp from '@agentclientprotocol/sdk';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import {
+  normalizeContext,
+  type Api,
+  type AssistantMessageEventStream,
+  type Model,
+  type SimpleStreamOptions,
+  type TranscriptContext,
+} from '@earendil-works/pi-ai';
 import type { BridgeConfig } from '../src/config.ts';
 import {
   FALLBACK_CONTEXT_WINDOW,
@@ -19,8 +28,9 @@ import {
   PI_BUILTIN_MISTRAL_PROVIDER,
   type ModelCatalogOptions,
 } from '../src/models.ts';
+import { BRIDGE_API, registerMistralProvider } from '../src/index.ts';
 import { VIBE_ENV } from '../src/vibe-protocol.ts';
-import { makeFakeSpawn, type FakeSpawnHarness } from './helpers/fake-acp-agent.ts';
+import { makeFakeSpawn, sendUpdate, type FakeSpawnHarness } from './helpers/fake-acp-agent.ts';
 
 const CWD = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-models-cwd-'));
 const LOG_DIR = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-models-logs-'));
@@ -40,7 +50,7 @@ const CONFIG: BridgeConfig = {
 interface CatalogHarness {
   catalog: ModelCatalog;
   /** onModels events: the full model list + alias map of each publication. */
-  events: Array<{ models: ProviderModelConfig[]; aliasByApiId: ReadonlyMap<string, string> }>;
+  events: Array<{ models: any[]; aliasByApiId: ReadonlyMap<string, string> }>;
   anomalies: string[];
 }
 
@@ -418,5 +428,196 @@ describe('ModelCatalog background refresh (ADR-0007: aliases volatile, re-read t
     await sleep(80);
     expect(fake.spawns.length).toBe(1); // no further refresh spawns
     expect(anomalies).toEqual([]); // dispose is not an anomaly
+  });
+});
+
+// ------------------------------------------------- entry-point wiring (T7)
+
+/** Minimal fake ExtensionAPI capturing registerProvider calls (like test/index.test.ts). */
+interface FakePi {
+  pi: ExtensionAPI;
+  registrations: Array<{ name: string; config: any }>;
+  handlers: Map<string, (event: any, ctx: any) => unknown>;
+}
+
+function makeFakePi(): FakePi {
+  const registrations: FakePi['registrations'] = [];
+  const handlers: FakePi['handlers'] = new Map();
+  const pi = {
+    registerProvider: (name: string, config: unknown) => {
+      registrations.push({ name, config });
+    },
+    registerTool: () => {},
+    on: (event: string, handler: (event: any, ctx: any) => unknown) => {
+      handlers.set(event, handler);
+      return () => handlers.delete(event);
+    },
+  } as unknown as ExtensionAPI;
+  return { pi, registrations, handlers };
+}
+
+const WIRED_MODEL: Model<Api> = {
+  id: 'api-id-one',
+  name: 'Model One',
+  api: BRIDGE_API,
+  provider: 'mistral-vibe',
+  baseUrl: 'vibe-acp',
+  input: ['text'],
+  reasoning: false,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: FALLBACK_CONTEXT_WINDOW,
+  maxTokens: FALLBACK_MAX_TOKENS,
+};
+
+function ctxOf(text: string): TranscriptContext {
+  return normalizeContext({
+    systemPrompt: 'sys',
+    messages: [{ role: 'user', content: text, timestamp: 1 }],
+    tools: [],
+  });
+}
+
+describe('T7 wiring through registerMistralProvider (src/index.ts)', () => {
+  it('background refresh re-registers the provider with the FULL new list (registerProvider REPLACES, AGENTS.md §6) and updates the alias map', async () => {
+    const fake = makeFakeSpawn({
+      modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
+    });
+    const { pi, registrations } = makeFakePi();
+    const provider = registerMistralProvider(
+      pi,
+      { ...CONFIG, modelRefreshIntervalMs: 25 },
+      {
+        cwd: CWD,
+        spawnChild: fake.spawnChild,
+        logDir: LOG_DIR,
+        onWarn: () => {},
+      }
+    );
+    try {
+      await waitFor(() => registrations.length === 1, 'initial registration');
+      expect(registrations[0].config.models.map((m: any) => m.id)).toEqual(['api-id-one']);
+
+      fake.behavior.modelOptions = [
+        { value: 'alias-one', name: 'Model One', description: 'api-id-one' },
+        { value: 'alias-two', name: 'Model Two', description: 'api-id-two' },
+      ];
+      await waitFor(() => registrations.length === 2, 'refresh re-registration');
+      // the FULL list, not a delta
+      expect(registrations[1].name).toBe('mistral-vibe');
+      expect(registrations[1].config.models.map((m: any) => m.id)).toEqual([
+        'api-id-one',
+        'api-id-two',
+      ]);
+      // the provider's alias map was refreshed too (pool routing key)
+      expect(provider.modelAliasFor({ ...WIRED_MODEL, id: 'api-id-two' })).toBe('alias-two');
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  it('a failed background refresh keeps the previous registration (no wipe) and logs an anomaly', async () => {
+    const fake = makeFakeSpawn({
+      modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
+    });
+    const { pi, registrations } = makeFakePi();
+    const anomalies: string[] = [];
+    const provider = registerMistralProvider(
+      pi,
+      { ...CONFIG, modelRefreshIntervalMs: 25 },
+      {
+        cwd: CWD,
+        spawnChild: fake.spawnChild,
+        logDir: LOG_DIR,
+        onWarn: () => {},
+        onAnomaly: (m) => anomalies.push(m),
+      }
+    );
+    try {
+      await waitFor(() => registrations.length === 1, 'initial registration');
+      fake.behavior.failInitialize = true; // every refresh spawn now fails
+      await sleep(120); // several refresh intervals pass
+      expect(registrations).toHaveLength(1); // old list kept, nothing re-registered
+      expect(anomalies.some((m) => m.includes('model refresh failed'))).toBe(true);
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  it('runtime usage_update.size on a provider session updates the registered contextWindow (cache per API id, re-register with full list)', async () => {
+    const fake = makeFakeSpawn({
+      modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
+      promptScript: async (params, client) => {
+        const update: acp.SessionUpdate = {
+          sessionUpdate: 'usage_update',
+          used: 0,
+          size: 250_000,
+        };
+        await sendUpdate(client, params.sessionId, update);
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const { pi, registrations } = makeFakePi();
+    const provider = registerMistralProvider(pi, CONFIG, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: () => {},
+    });
+    try {
+      await waitFor(() => registrations.length === 1, 'initial registration');
+      expect(registrations[0].config.models[0]).toMatchObject({
+        id: 'api-id-one',
+        contextWindow: FALLBACK_CONTEXT_WINDOW,
+      });
+
+      // one text turn through the registered streamSimple; the fake sends
+      // usage_update.size = 250000 for the active model during the prompt
+      const stream = registrations[0].config.streamSimple(WIRED_MODEL, ctxOf('hi'), {
+        sessionId: 'pi-1',
+      } as Partial<SimpleStreamOptions>) as AssistantMessageEventStream;
+      for await (const _event of stream) {
+        void _event;
+      }
+      await stream.result();
+
+      await waitFor(() => registrations.length === 2, 'capability re-registration');
+      expect(registrations[1].config.models[0]).toMatchObject({
+        id: 'api-id-one',
+        contextWindow: 250_000,
+      });
+      expect(registrations[1].config.models).toHaveLength(1); // still the full list
+      expect(provider.modelAliasFor(WIRED_MODEL)).toBe('alias-one'); // alias map intact
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  it('dispose() stops the refresh timer — no registrations after provider dispose', async () => {
+    const fake = makeFakeSpawn({
+      modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
+    });
+    const { pi, registrations } = makeFakePi();
+    const provider = registerMistralProvider(
+      pi,
+      { ...CONFIG, modelRefreshIntervalMs: 20 },
+      {
+        cwd: CWD,
+        spawnChild: fake.spawnChild,
+        logDir: LOG_DIR,
+        onWarn: () => {},
+      }
+    );
+    try {
+      await waitFor(() => registrations.length === 1, 'initial registration');
+      fake.behavior.modelOptions = [
+        { value: 'alias-one', name: 'Model One', description: 'api-id-one' },
+        { value: 'alias-two', name: 'Model Two', description: 'api-id-two' },
+      ];
+      await provider.dispose();
+      await sleep(80); // several intervals pass
+      expect(registrations).toHaveLength(1); // timer stopped with the catalog
+    } finally {
+      await provider.dispose();
+    }
   });
 });

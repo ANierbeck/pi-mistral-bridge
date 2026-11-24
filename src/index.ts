@@ -149,12 +149,17 @@ export function registerMistralProvider(
     return provider;
   }
 
+  // The catalog is created below; the provider reports runtime
+  // `usage_update.size` observations to it (T7 capability cache, per API id).
+  const catalogRef: { current: ModelCatalog | null } = { current: null };
   const provider = new MistralProvider({
     config,
     cwd,
     spawnChild: deps.spawnChild,
     onAnomaly: deps.onAnomaly,
     logDir: deps.logDir,
+    onUsageContextSize: (apiId, contextSize) =>
+      catalogRef.current?.noteContextSize(apiId, contextSize),
   });
 
   // The ModelCatalog (src/models.ts, T7, ADR-0005/0007) owns the model list:
@@ -188,6 +193,7 @@ export function registerMistralProvider(
       pi.registerProvider(config.providerName, providerConfig);
     },
   });
+  catalogRef.current = catalog;
   provider.onDispose(() => catalog.dispose());
   catalog.startRefresh();
 
