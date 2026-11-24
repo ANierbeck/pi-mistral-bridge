@@ -138,6 +138,7 @@ ignored; invalid values are a hard error that names the file and the key.
 | `toolPreTimeoutMs`      | `55000`       | Pre-emptive timeout for Pi tools executed in provider mode. Must not exceed `60000` (Vibe's hard per-turn budget); larger values are a config error.                        |
 | `abortWatchdogMs`       | `5000`        | After an abort (`session/cancel`), a prompt still unresolved after this many milliseconds kills the `vibe-acp` child and marks the session for rebuild.                   |
 | `discoveryTimeoutMs`    | `30000`       | Timeout for the short-lived discovery `vibe-acp` process that reads the model list at startup.                                                                             |
+| `startupDiscoveryTimeoutMs` | `10000`   | How long the extension factory waits for the first model discovery before Pi continues startup anyway (quiet warning; the discovery keeps running in the background, so the models still appear once it finishes). |
 | `modelRefreshIntervalMs`| `1800000`     | Background refresh interval for the model list; when the list changes, the provider is re-registered with the full new list.                                              |
 
 Example:

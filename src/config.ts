@@ -46,6 +46,15 @@ export const DEFAULT_ABORT_WATCHDOG_MS = 5_000;
  */
 export const DEFAULT_DISCOVERY_TIMEOUT_MS = 30_000;
 /**
+ * Startup race fix: Pi awaits an async extension factory before session_start
+ * and before queued registerProvider calls are flushed (pi-coding-agent
+ * docs/extensions.md, "Async factory functions"), so the factory awaits the
+ * FIRST model discovery with this bound. On timeout a quiet warning is
+ * logged and startup continues; the discovery itself is NOT aborted (it is
+ * still bounded by `discoveryTimeoutMs`) and keeps running in the background.
+ */
+export const DEFAULT_STARTUP_DISCOVERY_TIMEOUT_MS = 10_000;
+/**
  * T7 background model-list refresh: the catalog re-runs the discovery against
  * `vibe-acp` on this interval and re-registers the provider when the list
  * changed (aliases are volatile, ADR-0007). 30 min default.
@@ -71,6 +80,7 @@ export interface BridgeConfig {
   toolPreTimeoutMs: number;
   abortWatchdogMs: number;
   discoveryTimeoutMs: number;
+  startupDiscoveryTimeoutMs: number;
   modelRefreshIntervalMs: number;
 }
 
@@ -122,6 +132,7 @@ interface ConfigDraft {
   toolPreTimeoutMs?: number;
   abortWatchdogMs?: number;
   discoveryTimeoutMs?: number;
+  startupDiscoveryTimeoutMs?: number;
   modelRefreshIntervalMs?: number;
   askVibe?: Partial<AskVibeConfig>;
 }
@@ -176,6 +187,10 @@ function applyLayer(
       }
       case 'discoveryTimeoutMs': {
         draft.discoveryTimeoutMs = requirePositiveMs(path, key, value);
+        break;
+      }
+      case 'startupDiscoveryTimeoutMs': {
+        draft.startupDiscoveryTimeoutMs = requirePositiveMs(path, key, value);
         break;
       }
       case 'modelRefreshIntervalMs': {
@@ -273,6 +288,8 @@ export function loadConfig(cwd: string, options: LoadConfigOptions = {}): Bridge
     toolPreTimeoutMs: draft.toolPreTimeoutMs ?? DEFAULT_TOOL_PRE_TIMEOUT_MS,
     abortWatchdogMs: draft.abortWatchdogMs ?? DEFAULT_ABORT_WATCHDOG_MS,
     discoveryTimeoutMs: draft.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
+    startupDiscoveryTimeoutMs:
+      draft.startupDiscoveryTimeoutMs ?? DEFAULT_STARTUP_DISCOVERY_TIMEOUT_MS,
     modelRefreshIntervalMs: draft.modelRefreshIntervalMs ?? DEFAULT_MODEL_REFRESH_INTERVAL_MS,
   };
   return deepFreeze(config);

@@ -26,13 +26,19 @@
  * registers the AskVibe tool (src/ask-vibe.ts, ADR-0004) — Pi's extension API
  * has no agent-mode registration, so AskVibe is a custom `ask_vibe` tool.
  *
- * Registration timing: Pi's docs (docs/extensions.md, `pi.registerProvider`)
- * state that calls made after the initial extension load take effect
- * immediately, while async factories are awaited before startup — so the
- * discovery is kicked off async at load (the load is NOT blocked on a
- * `vibe-acp` spawn) and the provider is registered as soon as the list is
- * known; the models then land in the picker without a `/reload`. If discovery
- * fails, nothing is registered and a clear message is logged (the user runs
+ * Registration timing (startup race fix): Pi awaits an async extension
+ * factory before session_start and before queued `registerProvider` calls
+ * are flushed (pi-coding-agent docs/extensions.md, "Async factory
+ * functions"), so the default export is an async factory that awaits the
+ * FIRST model discovery with a bounded timeout (`startupDiscoveryTimeoutMs`,
+ * src/config.ts): on success the models are registered before Pi's first
+ * render — `pi -p`, `--list-models` and `--model <provider>/<id>` no longer
+ * race the discovery and silently fall back to another provider. On timeout
+ * a quiet warning is logged and startup continues; the discovery itself is
+ * NOT aborted (it stays bounded by `discoveryTimeoutMs`) and the background
+ * refresh keeps the list flowing, so the models land in the picker without a
+ * `/reload` as soon as discovery finishes. If discovery fails, nothing is
+ * registered and a clear message is logged (the user runs
  * `vibe-acp --setup` if Vibe is not signed in — the bridge never asks for or
  * stores a key, AGENTS.md §14).
  */
@@ -105,16 +111,70 @@ export interface RegisterMistralProviderDeps {
 }
 
 /**
- * Wires the bridge into Pi: creates the {@link MistralProvider}, starts the
- * async model discovery, registers the provider once the list is known, and
- * hooks `session_start` / `session_shutdown`. Returns the provider (tests use
- * it to drive `streamSimple` and to dispose).
+ * The result of {@link registerProviderWithStartup}: the provider plus the
+ * bounded startup wait.
  */
-export function registerMistralProvider(
+export interface RegisteredBridge {
+  /** The registered provider (callers/tests drive `streamSimple` and dispose through it). */
+  provider: MistralProvider;
+  /**
+   * Resolves when the FIRST model discovery has settled (success or failure)
+   * or when `config.startupDiscoveryTimeoutMs` elapsed — whichever comes
+   * first. Never rejects. On the timeout path a quiet warning was logged and
+   * the discovery keeps running in the background; a dispose during the wait
+   * resolves it silently (the intentional dispose-abort, commit 828f223).
+   */
+  startupReady: Promise<void>;
+}
+
+/**
+ * Bounded await of the first model discovery (startup race fix, see the
+ * module doc): races `firstDiscovery` against `config.startupDiscoveryTimeoutMs`.
+ * The discovery itself is NOT aborted on timeout — only the wait is bounded —
+ * so the models still land via the background discovery/refresh. Never
+ * rejects; the timeout path logs a quiet warning (not an error).
+ */
+async function awaitFirstDiscovery(
+  firstDiscovery: Promise<void>,
+  config: BridgeConfig,
+  warn: (message: string) => void
+): Promise<void> {
+  let timedOut = false;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      resolve('timeout');
+    }, config.startupDiscoveryTimeoutMs);
+    timer.unref();
+  });
+  await Promise.race([
+    firstDiscovery.then(
+      () => 'discovery' as const,
+      () => 'discovery' as const
+    ),
+    timeout,
+  ]);
+  if (timedOut) {
+    warn(
+      `startup model discovery still in progress after ${config.startupDiscoveryTimeoutMs} ms — ` +
+        `continuing startup; the "${config.providerName}" models appear as soon as the discovery ` +
+        `finishes (the background refresh keeps the list flowing)`
+    );
+  }
+}
+
+/**
+ * Wires the bridge provider into Pi: creates the {@link MistralProvider},
+ * starts the model discovery, registers the provider once the list is known,
+ * hooks `session_start` / `session_shutdown`, and returns the provider
+ * together with {@link RegisteredBridge.startupReady} — the bounded await of
+ * the first discovery that the async extension factory waits on.
+ */
+function registerProviderWithStartup(
   pi: ExtensionAPI,
   config: BridgeConfig,
   deps: RegisterMistralProviderDeps = {}
-): MistralProvider {
+): RegisteredBridge {
   const cwd = deps.cwd ?? process.cwd();
   const warn: (message: string) => void =
     deps.onWarn ??
@@ -146,7 +206,7 @@ export function registerMistralProvider(
     pi.on('session_shutdown', () => {
       void provider.dispose();
     });
-    return provider;
+    return { provider, startupReady: Promise.resolve() };
   }
 
   // The catalog is created below; the provider reports runtime
@@ -197,10 +257,15 @@ export function registerMistralProvider(
   provider.onDispose(() => catalog.dispose());
   catalog.startRefresh();
 
-  // Lazy-but-early discovery (ADR-0005): registerProvider after the initial
-  // load takes effect immediately (Pi docs), so the models appear in the
-  // picker as soon as discovery resolves.
-  void (async (): Promise<void> => {
+  // First discovery (ADR-0005): kicked off at load and awaited by the async
+  // extension factory (bounded by `startupDiscoveryTimeoutMs`, see
+  // awaitFirstDiscovery), so on success the provider is registered before
+  // Pi's first render; the background refresh above keeps the list flowing
+  // afterwards. A dispose() during the in-flight discovery (session_shutdown)
+  // aborts it intentionally — the abort hook killed the discovery child
+  // (AGENTS.md §15). That is a quiet shutdown, not a discovery failure: no
+  // warning (commit 828f223).
+  const firstDiscovery = (async (): Promise<void> => {
     try {
       await catalog.discover();
     } catch (error) {
@@ -217,6 +282,7 @@ export function registerMistralProvider(
       }
     }
   })();
+  const startupReady = awaitFirstDiscovery(firstDiscovery, config, warn);
 
   pi.on('session_start', () => {
     void provider.openSession();
@@ -224,7 +290,21 @@ export function registerMistralProvider(
   pi.on('session_shutdown', () => {
     void provider.dispose();
   });
-  return provider;
+  return { provider, startupReady };
+}
+
+/**
+ * Wires the bridge provider into Pi (see {@link registerProviderWithStartup})
+ * and returns the provider — tests use it to drive `streamSimple` and to
+ * dispose. Callers that need the startup wait use {@link wireExtension} /
+ * {@link bridgeExtension} instead.
+ */
+export function registerMistralProvider(
+  pi: ExtensionAPI,
+  config: BridgeConfig,
+  deps: RegisterMistralProviderDeps = {}
+): MistralProvider {
+  return registerProviderWithStartup(pi, config, deps).provider;
 }
 
 // ------------------------------------------------------------- entry point
@@ -232,23 +312,57 @@ export function registerMistralProvider(
 /** Test/deps injection for {@link wireExtension} (provider + AskVibe). */
 export interface WireExtensionDeps extends RegisterMistralProviderDeps, RegisterAskVibeDeps {}
 
+/** The wired extension: provider + AskVibe + the bounded startup wait. */
+export interface WiredExtension {
+  provider: MistralProvider;
+  askVibe: AskVibeManager | null;
+  /** Bounded await of the first model discovery (see {@link RegisteredBridge.startupReady}). */
+  startupReady: Promise<void>;
+}
+
 /**
  * Wires the whole bridge into Pi: the provider mode
- * ({@link registerMistralProvider}) and — when `config.askVibe.enabled` —
+ * ({@link registerProviderWithStartup}) and — when `config.askVibe.enabled` —
  * the AskVibe tool ({@link registerAskVibeTool}, ADR-0004). Returns both
- * runtimes so callers/tests can dispose them.
+ * runtimes plus the startup wait so callers/tests can dispose them and await
+ * the first discovery.
  */
 export function wireExtension(
   pi: ExtensionAPI,
   config: BridgeConfig,
   deps: WireExtensionDeps = {}
-): { provider: MistralProvider; askVibe: AskVibeManager | null } {
-  const provider = registerMistralProvider(pi, config, deps);
+): WiredExtension {
+  const { provider, startupReady } = registerProviderWithStartup(pi, config, deps);
   const askVibe = config.askVibe.enabled ? registerAskVibeTool(pi, config, deps) : null;
-  return { provider, askVibe };
+  return { provider, askVibe, startupReady };
 }
 
-/** Extension factory: load config, wire provider + AskVibe (see module doc). */
-export default function (pi: ExtensionAPI): void {
-  wireExtension(pi, loadConfig(process.cwd()));
+/**
+ * Async factory core (the default export delegates here): wires provider +
+ * AskVibe and awaits the FIRST model discovery bounded by
+ * `startupDiscoveryTimeoutMs`, so on a fast discovery the models are
+ * registered before Pi's first render (see the module doc); on timeout
+ * startup continues with a quiet warning and the background discovery/refresh
+ * keeps the models flowing. Returns the wired runtimes so callers/tests can
+ * dispose them.
+ */
+export async function bridgeExtension(
+  pi: ExtensionAPI,
+  config: BridgeConfig,
+  deps: WireExtensionDeps = {}
+): Promise<WiredExtension> {
+  const wired = wireExtension(pi, config, deps);
+  await wired.startupReady;
+  return wired;
+}
+
+/**
+ * Extension factory (async): Pi awaits the returned promise before
+ * session_start and before queued registerProvider calls are flushed
+ * (pi-coding-agent docs/extensions.md, "Async factory functions") — load
+ * config, wire provider + AskVibe, await the first model discovery bounded by
+ * `startupDiscoveryTimeoutMs` (see the module doc).
+ */
+export default async function (pi: ExtensionAPI): Promise<void> {
+  await bridgeExtension(pi, loadConfig(process.cwd()));
 }

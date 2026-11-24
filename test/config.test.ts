@@ -9,6 +9,7 @@ import {
   DEFAULT_MODEL_REFRESH_INTERVAL_MS,
   DEFAULT_PROCESS_IDLE_TIMEOUT_MS,
   DEFAULT_PROVIDER_NAME,
+  DEFAULT_STARTUP_DISCOVERY_TIMEOUT_MS,
   DEFAULT_TOOL_PRE_TIMEOUT_MS,
   DEFAULT_VIBE_ACP_PATH,
   loadConfig,
@@ -59,6 +60,7 @@ describe('config defaults', () => {
     expect(VIBE_TURN_BUDGET_MS).toBe(60_000); // Vibe 3.1.4 hardcoded per-turn budget
     expect(DEFAULT_ABORT_WATCHDOG_MS).toBe(5_000); // T3: kill a hung vibe-acp after session/cancel
     expect(DEFAULT_DISCOVERY_TIMEOUT_MS).toBe(30_000); // T5 C2: kill a hung discovery vibe-acp
+    expect(DEFAULT_STARTUP_DISCOVERY_TIMEOUT_MS).toBe(10_000); // startup race fix: bounded await of the first discovery
     expect(DEFAULT_MODEL_REFRESH_INTERVAL_MS).toBe(30 * 60 * 1000); // T7: background model-list refresh
   });
 
@@ -73,6 +75,7 @@ describe('config defaults', () => {
       toolPreTimeoutMs: 55_000,
       abortWatchdogMs: 5_000,
       discoveryTimeoutMs: 30_000,
+      startupDiscoveryTimeoutMs: 10_000,
       modelRefreshIntervalMs: 1_800_000,
     });
   });
@@ -243,6 +246,16 @@ describe('config validation', () => {
     expect(load(cwd, home).discoveryTimeoutMs).toBe(2_500);
     writeProject(cwd, JSON.stringify({ discoveryTimeoutMs: 0 }));
     expect(loadError(cwd, home)).toContain('discoveryTimeoutMs');
+  });
+
+  it('accepts a custom startupDiscoveryTimeoutMs from the project file and rejects a non-positive one', () => {
+    const { home, cwd } = makeSandbox();
+    writeProject(cwd, JSON.stringify({ startupDiscoveryTimeoutMs: 2_500 }));
+    expect(load(cwd, home).startupDiscoveryTimeoutMs).toBe(2_500);
+    writeProject(cwd, JSON.stringify({ startupDiscoveryTimeoutMs: 0 }));
+    expect(loadError(cwd, home)).toContain('startupDiscoveryTimeoutMs');
+    writeProject(cwd, JSON.stringify({ startupDiscoveryTimeoutMs: 'soon' }));
+    expect(loadError(cwd, home)).toContain('positive number');
   });
 
   it('accepts a custom modelRefreshIntervalMs from the project file and rejects a non-positive one', () => {
