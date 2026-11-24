@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-24). Would amend ADR-0003, ADR-0004 and ADR-0005 — awaiting owner acceptance.
+Accepted (2026-11-24). Amends ADR-0003, ADR-0004 and ADR-0005.
 
 ## Context
 
