@@ -19,6 +19,8 @@ import {
   TOOL_CALL_META_EFFECT_KIND,
   TOOL_CALL_META_TOOL_NAME,
   TOOL_CALL_UPDATE_RAW_OUTPUT_APPROVAL,
+  MODEL_CONFIG_OPTION_ID,
+  PROMPT_RESPONSE_USAGE,
   UNIFIED_HARNESS_DISCOVERY_TOOL,
   USAGE_UPDATE_COST,
   USAGE_UPDATE_META,
@@ -164,5 +166,13 @@ describe('Vibe-specific ACP _meta / extension surfaces (pinned literals)', () =>
 
   it('pins the unified-harness discovery pseudo-tool that is not a Pi tool', () => {
     expect(UNIFIED_HARNESS_DISCOVERY_TOOL).toBe('search_tool_functions');
+  });
+
+  it('pins the session config option id that carries the model list (T7 reads it)', () => {
+    expect(MODEL_CONFIG_OPTION_ID).toBe('model');
+  });
+
+  it('pins the session/prompt response usage field (unstable ACP v1 field Vibe populates)', () => {
+    expect(PROMPT_RESPONSE_USAGE).toBe('usage');
   });
 });

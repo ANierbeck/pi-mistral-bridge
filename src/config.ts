@@ -30,6 +30,14 @@ export const DEFAULT_PROCESS_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 export const DEFAULT_TOOL_PRE_TIMEOUT_MS = 55_000;
 /** The hard per-turn budget on Vibe 3.1.4; a pre-timeout above it is a config error. */
 export const VIBE_TURN_BUDGET_MS = 60_000;
+/**
+ * T3 abort watchdog: after `session/cancel`, a pending prompt that does not
+ * resolve within this time kills the `vibe-acp` child (a pending
+ * `session/request_permission` makes `session/cancel` hang on Vibe 3.1.4 —
+ * paid run prompt 3, ADR-0006) and marks the session dirty for rebuild
+ * (ADR-0003).
+ */
+export const DEFAULT_ABORT_WATCHDOG_MS = 5_000;
 
 /** AskVibe modes per ADR-0004 (design: `ask` / `plan` / `edit`, default `ask`). */
 export const ASK_VIBE_MODES = ['ask', 'plan', 'edit'] as const;
@@ -48,6 +56,7 @@ export interface BridgeConfig {
   debug: boolean;
   processIdleTimeoutMs: number;
   toolPreTimeoutMs: number;
+  abortWatchdogMs: number;
 }
 
 export interface LoadConfigOptions {
@@ -95,6 +104,7 @@ interface ConfigDraft {
   debug?: boolean;
   processIdleTimeoutMs?: number;
   toolPreTimeoutMs?: number;
+  abortWatchdogMs?: number;
   askVibe?: Partial<AskVibeConfig>;
 }
 
@@ -140,6 +150,10 @@ function applyLayer(
       }
       case 'processIdleTimeoutMs': {
         draft.processIdleTimeoutMs = requirePositiveMs(path, key, value);
+        break;
+      }
+      case 'abortWatchdogMs': {
+        draft.abortWatchdogMs = requirePositiveMs(path, key, value);
         break;
       }
       case 'toolPreTimeoutMs': {
@@ -231,6 +245,7 @@ export function loadConfig(cwd: string, options: LoadConfigOptions = {}): Bridge
     debug: draft.debug ?? false,
     processIdleTimeoutMs: draft.processIdleTimeoutMs ?? DEFAULT_PROCESS_IDLE_TIMEOUT_MS,
     toolPreTimeoutMs: draft.toolPreTimeoutMs ?? DEFAULT_TOOL_PRE_TIMEOUT_MS,
+    abortWatchdogMs: draft.abortWatchdogMs ?? DEFAULT_ABORT_WATCHDOG_MS,
   };
   return deepFreeze(config);
 }

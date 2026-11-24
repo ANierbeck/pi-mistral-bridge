@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { BridgeConfig } from '../src/config.ts';
 import {
+  DEFAULT_ABORT_WATCHDOG_MS,
   DEFAULT_PROCESS_IDLE_TIMEOUT_MS,
   DEFAULT_PROVIDER_NAME,
   DEFAULT_TOOL_PRE_TIMEOUT_MS,
@@ -54,6 +55,7 @@ describe('config defaults', () => {
     expect(DEFAULT_PROCESS_IDLE_TIMEOUT_MS).toBe(10 * 60 * 1000); // ADR-0007 pool reaper: 10 min
     expect(DEFAULT_TOOL_PRE_TIMEOUT_MS).toBe(55_000); // ADR-0006: pre-empt the hard 60 s budget
     expect(VIBE_TURN_BUDGET_MS).toBe(60_000); // Vibe 3.1.4 hardcoded per-turn budget
+    expect(DEFAULT_ABORT_WATCHDOG_MS).toBe(5_000); // T3: kill a hung vibe-acp after session/cancel
   });
 
   it('returns the documented defaults when no config file exists', () => {
@@ -65,6 +67,7 @@ describe('config defaults', () => {
       debug: false,
       processIdleTimeoutMs: 600_000,
       toolPreTimeoutMs: 55_000,
+      abortWatchdogMs: 5_000,
     });
   });
 
@@ -216,6 +219,16 @@ describe('config validation', () => {
     const other = makeSandbox();
     writeProject(other.cwd, JSON.stringify({ processIdleTimeoutMs: -5 }));
     expect(loadError(other.cwd, other.home)).toContain('processIdleTimeoutMs');
+
+    const watchdog = makeSandbox();
+    writeProject(watchdog.cwd, JSON.stringify({ abortWatchdogMs: 0 }));
+    expect(loadError(watchdog.cwd, watchdog.home)).toContain('abortWatchdogMs');
+  });
+
+  it('accepts a custom abortWatchdogMs from the project file', () => {
+    const { home, cwd } = makeSandbox();
+    writeProject(cwd, JSON.stringify({ abortWatchdogMs: 1_500 }));
+    expect(load(cwd, home).abortWatchdogMs).toBe(1_500);
   });
 
   it('warns (does not crash) on unknown top-level keys and still loads', () => {

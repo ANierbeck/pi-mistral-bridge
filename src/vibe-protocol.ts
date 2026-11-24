@@ -268,3 +268,23 @@ export const PERMISSION_OPTION_REJECT_ONCE = 'reject_once';
  * the bridge must never map it to one.
  */
 export const UNIFIED_HARNESS_DISCOVERY_TOOL = 'search_tool_functions';
+
+/**
+ * The `session/new` `configOptions` entry id that carries the model list
+ * (`{id:"model", category:"model", type:"select", options:[{value: alias,
+ * name, description: apiModelId}]}`). ADR-0005/ADR-0007: the model list for
+ * `registerProvider` is read from this option; the alias (`value`) is volatile,
+ * the API model id (`description`) is the stable key. Pinned so a rename in a
+ * future Vibe version fails loudly here.
+ */
+export const MODEL_CONFIG_OPTION_ID = 'model';
+
+/**
+ * The `session/prompt` response `usage` field — an UNSTABLE ACP v1 field that
+ * vibe-acp 3.1.4 populates (`{totalTokens, inputTokens, outputTokens,
+ * cachedReadTokens}`, cachedReadTokens omitted when 0; paid run prompts 1-2,
+ * research §"Vibe 3.1.4 paid run"). The SDK 2.9.1 stable types do not declare
+ * it, but it passes through on the wire, so the client reads it via this
+ * pinned key.
+ */
+export const PROMPT_RESPONSE_USAGE = 'usage';
