@@ -963,6 +963,46 @@ describe('MistralProvider.streamSimple: late events while parked (ADR-0002)', ()
   });
 });
 
+describe('MistralProvider: openSession and the no-live batch anomaly', () => {
+  it('openSession resets bridge/pool/session state; a batch with no running ACP prompt is an anomaly, not a crash', async () => {
+    const h = makeProvider({ promptScript: textTurnScript });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('stop');
+      expect(h.bridgeCount()).toBe(1);
+
+      // a bridge tool call while no ACP prompt is running: it parks, the
+      // batch fires, but there is no live turn to attach it to -> anomaly,
+      // and the pre-timeout still answers the parked call
+      const client = await h.mcpClient();
+      const pending = client.callTool({ name: 'pi__echo', arguments: { text: 'orphan' } });
+      await waitFor(
+        () => h.anomalies.some((a) => a.includes('no running ACP prompt')),
+        'no-live batch anomaly'
+      );
+      const orphan = (await pending) as { isError?: boolean };
+      expect(orphan.isError).toBe(true); // pre-timeout answered it
+
+      // session_start: fresh bridge + pool, cleared session state (lazy:
+      // the bridge is only recreated on the next call)
+      await h.provider.openSession();
+      expect(h.bridgeCount()).toBe(1);
+      const stream2 = h.provider.streamSimple(MODEL, contextOf([user('hi again')]), {
+        sessionId: 'pi-2',
+      });
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.bridgeCount()).toBe(2); // a fresh bridge was created
+      expect(h.sessionNews()).toBe(2); // ... on a fresh pooled process
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+});
+
 describe('MistralProvider.streamSimple: steering abandons a parked prompt (ADR-0003)', () => {
   it('steering while parked: the old prompt is cancelled, parked calls released with an error, and the new user message rebuilds on a fresh session', async () => {
     // what the parked MCP call resolved to once the provider released it

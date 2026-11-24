@@ -543,7 +543,21 @@ export class MistralProvider {
     this.live.set(key, live);
     stream.push({ type: 'start', partial: turnStream.message });
     this.attachAbort(live, state, signal);
-    void this.consumeLoop(live, model);
+    void this.consumeLoop(live, model).catch((error: unknown) => {
+      // last resort: consumeLoop already handles per-prompt errors; a throw
+      // from emit/finishTurn must never become an unhandled rejection nor
+      // leave the returned stream open (AGENTS.md §15)
+      live.state.dirty = true;
+      const turn = live.current;
+      if (!turn.ended) {
+        turn.message.stopReason = 'error';
+        turn.message.errorMessage = String(error);
+        turn.stream.push({ type: 'error', reason: 'error', error: turn.message });
+        turn.stream.end();
+        turn.ended = true;
+      }
+      this.anomaly(`consumeLoop failed: ${String(error)}`);
+    });
   }
 
   private newTurnStream(stream: AssistantMessageEventStream, model: Model<Api>): TurnStream {

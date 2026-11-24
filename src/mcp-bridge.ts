@@ -207,10 +207,14 @@ export async function createMcpBridge(options: CreateMcpBridgeOptions = {}): Pro
 
   const log = (event: string, fields: Record<string, unknown> = {}): void => {
     if (!logger) return;
-    let line = JSON.stringify({ t: new Date().toISOString(), ev: event, ...fields });
-    line = line.split(token).join(REDACTED);
-    line = line.replace(BEARER_RE, `Bearer ${REDACTED}`);
-    logger(line);
+    try {
+      let line = JSON.stringify({ t: new Date().toISOString(), ev: event, ...fields });
+      line = line.split(token).join(REDACTED);
+      line = line.replace(BEARER_RE, `Bearer ${REDACTED}`);
+      logger(line);
+    } catch {
+      // debug logging must never break request handling (AGENTS.md §15)
+    }
   };
 
   let currentTools: readonly BridgeTool[] = [...initialTools];
@@ -250,8 +254,15 @@ export async function createMcpBridge(options: CreateMcpBridgeOptions = {}): Pro
         args: c.args,
       }));
       log('batch', { count: batch.length, callIds: batch.map((c) => c.callId) });
-      if (batchHandler) batchHandler(batch);
-      else log('batch_without_handler', { count: batch.length });
+      if (batchHandler) {
+        try {
+          batchHandler(batch);
+        } catch (error) {
+          // a throwing handler must not crash the timer callback (uncaught
+          // exception); the parked calls stay pending and can still be answered
+          log('batch_handler_error', { count: batch.length, error: String(error) });
+        }
+      } else log('batch_without_handler', { count: batch.length });
     }, batchWindowMs);
   }
 
@@ -362,7 +373,10 @@ export async function createMcpBridge(options: CreateMcpBridgeOptions = {}): Pro
         tooLarge = true;
         chunks.length = 0;
         log('body_too_large', { size, max: MAX_BODY_BYTES });
-        res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
+        // no connection:close — the client may still be writing the body;
+        // the remaining chunks are drained below and the response is read
+        // reliably once the request completes
+        res.writeHead(413, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: `request body exceeds ${MAX_BODY_BYTES} bytes` }));
         continue;
       }

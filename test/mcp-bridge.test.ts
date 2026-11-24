@@ -492,6 +492,56 @@ describe('createMcpBridge', () => {
     expect(lines.some((l) => l.includes('delivery_ignored'))).toBe(true);
   });
 
+  it('a throwing batch handler is caught and logged, the bridge keeps working', async () => {
+    const lines: string[] = [];
+    const bridge = await makeBridge({}, lines);
+    bridge.onBatch(() => {
+      throw new Error('handler bug');
+    });
+    const client = await connect(bridge);
+    const pending = client.callTool({ name: 'pi__echo', arguments: { text: 'x' } });
+    // the timer callback must not crash: the call stays parked and can be answered
+    await waitFor(
+      () => lines.some((l) => l.includes('"ev":"batch_handler_error"')),
+      'handler error logged'
+    );
+    // a later call still works end to end
+    bridge.onBatch(() => {});
+    const batches = recordBatches(bridge);
+    const p2 = client.callTool({ name: 'pi__echo', arguments: { text: 'y' } });
+    await waitFor(() => batches.length === 1, 'second batch');
+    bridge.deliverResults([
+      { callId: batches[0][0].callId, content: [{ type: 'text', text: 'ok' }] },
+    ]);
+    const r2 = (await p2) as { content: Array<{ text?: string }> };
+    expect(r2.content[0]?.text).toBe('ok');
+    const r1 = (await pending) as { isError?: boolean };
+    expect(r1.isError).toBe(true); // pre-timeout answered the first call
+  });
+
+  it('a throwing debug logger never breaks request handling', async () => {
+    const bridge = await createMcpBridge({
+      tools: TOOLS,
+      batchWindowMs: 40,
+      toolPreTimeoutMs: 1_000,
+      logger: () => {
+        throw new Error('disk full');
+      },
+    });
+    bridges.push(bridge);
+    const client = await connect(bridge);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(['pi__echo', 'pi__read']);
+    const batches = recordBatches(bridge);
+    const pending = client.callTool({ name: 'pi__echo', arguments: { text: 'x' } });
+    await waitFor(() => batches.length === 1, 'batch');
+    bridge.deliverResults([
+      { callId: batches[0][0].callId, content: [{ type: 'text', text: 'ok' }] },
+    ]);
+    const result = (await pending) as { content: Array<{ text?: string }> };
+    expect(result.content[0]?.text).toBe('ok');
+  });
+
   it('releaseParked answers all parked calls with isError and drops the unbatched queue', async () => {
     const lines: string[] = [];
     // long batch window: the calls stay queued (not yet batched) when released
