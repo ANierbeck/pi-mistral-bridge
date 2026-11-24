@@ -94,9 +94,27 @@ real `vibe-acp` only with per-run owner approval (`MISTRAL_BRIDGE_IT=1`).
     closest safe available mode (plan→ask, edit→accept-edits→ask) and the
     effective mode is recorded in the tool result details — the bridge never
     reports a mode that was not actually set.
+  - Persisting permission options are never answered. ADR-0004 says the
+    user's choice is answered verbatim (allow once / always / reject), but
+    `allow_always*` options are downgraded to `allow_once` plus a logged
+    anomaly and are never persisted (src/ask-vibe.ts picks by optionId
+    prefix, not only by kind, so a mismatched id cannot slip through). The
+    bridge never grants a permission it will not remember.
 - [x] **T7 Models.** `src/models.ts`: read `model` config option, cache by
       API id, background refresh, enrich capabilities from
       `usage_update.size` / Pi registry (no hardcoded models, §9).
+
+  **Known gaps** (T5/T7; flagged for the ADR-0008 round together with the
+  T6 deviations above — accepted ADRs are immutable, §12):
+
+  - ADR-0003 lists a new cwd as a history-rebuild trigger, but the
+    session map (src/session-map.ts) keys by Pi sessionId only. Low risk:
+    Pi ties the cwd to the session, and a replaced session fires
+    `session_shutdown`, which disposes the runtime — so a cwd change in
+    practice arrives as a fresh runtime, never as a stale-cwd reuse.
+  - ADR-0005's cache file ("cached under the bridge's own cache file, so
+    the next Pi start can register…") is NOT implemented: the catalog is
+    in-memory (src/models.ts) and re-discovers on every Pi start.
 - [ ] **T8 Docs + review.** README (install, config, both modes, verified
       Vibe versions, honest note on provider-mode policy risk per ADR-0002),
       PI.md, then `requesting-code-review` with builtin `reviewer` (§1),
