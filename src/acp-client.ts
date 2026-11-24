@@ -687,6 +687,13 @@ export interface VibeAcpProcessOptions {
   spawnChild?: SpawnChildFn | undefined;
   onAnomaly?: ((message: string) => void) | undefined;
   logFileBase: string;
+  /**
+   * Abort hook: when the signal fires, the child is killed immediately (even
+   * mid-`initialize`), which unblocks every pending ACP request through the
+   * exit path. Used by model discovery so `dispose()`/timeout can kill a
+   * wedged discovery child (no orphan, AGENTS.md §15).
+   */
+  signal?: AbortSignal | undefined;
 }
 
 function defaultAnomalySink(message: string): void {
@@ -761,6 +768,17 @@ export class VibeAcpProcess {
     }
     const spawnChild = options.spawnChild ?? defaultSpawnChild;
     const child = spawnChild(options.vibeAcpPath, [], env, options.cwd);
+    // Abort hook: kill the child the moment the signal fires — even while
+    // `initialize` is still in flight — so a wedged child can never outlive
+    // its owner (discovery timeout / provider dispose, AGENTS.md §15). The
+    // exit then fails every pending request through the connection-close path.
+    if (options.signal) {
+      const onAbort = (): void => {
+        child.kill('SIGKILL');
+      };
+      if (options.signal.aborted) onAbort();
+      else options.signal.addEventListener('abort', onAbort, { once: true });
+    }
     try {
       const debugLog = options.debug
         ? new AcpDebugLog(

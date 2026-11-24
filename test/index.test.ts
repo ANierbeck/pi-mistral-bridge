@@ -42,6 +42,7 @@ const CONFIG: BridgeConfig = {
   processIdleTimeoutMs: 600_000,
   toolPreTimeoutMs: 1_500,
   abortWatchdogMs: 5_000,
+  discoveryTimeoutMs: 30_000,
 };
 
 const MODEL: Model<Api> = {
@@ -206,6 +207,53 @@ describe('registerMistralProvider: model discovery + registration (ADR-0005/0007
       expect(registrations).toEqual([]);
       expect(warns[0]).toContain('mistral');
       expect(fake.spawns).toHaveLength(0); // no discovery process needed
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  it('kills a hung discovery child after discoveryTimeoutMs and registers nothing', async () => {
+    const fake = makeFakeSpawn({
+      // initialize never answers: the discovery process hangs mid-handshake
+      onInitialize: () => new Promise(() => {}),
+    });
+    const { pi, registrations } = makeFakePi();
+    const warns: string[] = [];
+    const provider = registerMistralProvider(
+      pi,
+      { ...CONFIG, discoveryTimeoutMs: 120 },
+      { cwd: CWD, spawnChild: fake.spawnChild, logDir: LOG_DIR, onWarn: (m) => warns.push(m) }
+    );
+    try {
+      await waitFor(() => warns.length === 1, 'discovery timeout warning', 5_000);
+      expect(registrations).toEqual([]); // nothing registered on timeout
+      expect(warns[0]).toContain('model discovery failed');
+      expect(warns[0]).toContain('timed out after 120 ms');
+      // the hung child was killed by the timeout, not orphaned (AGENTS.md §15)
+      expect(fake.children[0].killedWith.length).toBeGreaterThan(0);
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  it('dispose() during discovery kills the discovery child and never calls registerProvider', async () => {
+    const fake = makeFakeSpawn({
+      onInitialize: () => new Promise(() => {}), // hangs until killed
+    });
+    const { pi, registrations } = makeFakePi();
+    const warns: string[] = [];
+    const provider = registerMistralProvider(pi, CONFIG, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: (m) => warns.push(m),
+    });
+    try {
+      await waitFor(() => fake.spawns.length === 1, 'discovery child spawned');
+      await provider.dispose(); // session_shutdown while discovery is in flight
+      await waitFor(() => warns.length === 1, 'discovery abort warning', 5_000);
+      expect(registrations).toEqual([]); // the disposed check before registerProvider held
+      expect(fake.children[0].killedWith.length).toBeGreaterThan(0); // child killed via the abort hook
     } finally {
       await provider.dispose();
     }

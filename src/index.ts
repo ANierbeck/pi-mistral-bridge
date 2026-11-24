@@ -31,7 +31,12 @@ import type {
   ProviderModelConfig,
 } from '@earendil-works/pi-coding-agent';
 import { loadConfig, type BridgeConfig } from './config.ts';
-import { defaultDebugLogDir, VibeAcpProcess, type SpawnChildFn } from './acp-client.ts';
+import {
+  AcpClientError,
+  defaultDebugLogDir,
+  VibeAcpProcess,
+  type SpawnChildFn,
+} from './acp-client.ts';
 import { MistralProvider } from './provider.ts';
 
 // ------------------------------------------------------------- registration
@@ -81,6 +86,12 @@ export interface DiscoverModelsOptions {
   spawnChild?: SpawnChildFn | undefined;
   onAnomaly?: ((message: string) => void) | undefined;
   logDir?: string | undefined;
+  /**
+   * Abort hook owned by the caller (the provider): when it fires, the
+   * discovery child is killed immediately and discovery rejects. Lets
+   * `dispose()` kill an in-flight discovery (no orphan, AGENTS.md §15).
+   */
+  signal?: AbortSignal | undefined;
 }
 
 /**
@@ -90,33 +101,62 @@ export interface DiscoverModelsOptions {
  * via {@link AcpSession.modelOptions} (`MODEL_CONFIG_OPTION_ID`). The process
  * is terminated afterwards — it serves no Pi session. The list is cached
  * in-memory by the caller (the provider's alias map).
+ *
+ * Bounded: the whole discovery is raced against `config.discoveryTimeoutMs`
+ * and the optional `signal`; either one kills the child (via the abort hook
+ * in {@link VibeAcpProcess.start}) and rejects with a clear error, so a
+ * wedged `vibe-acp` can never hang the extension load or outlive the provider.
  */
 export async function discoverModels(options: DiscoverModelsOptions): Promise<DiscoveredModel[]> {
   const { config, cwd } = options;
-  const proc = await VibeAcpProcess.start({
-    vibeAcpPath: config.vibeAcpPath,
-    cwd,
-    abortWatchdogMs: config.abortWatchdogMs,
-    debug: config.debug,
-    logDir: options.logDir ?? defaultDebugLogDir(),
-    spawnChild: options.spawnChild,
-    onAnomaly: options.onAnomaly,
-    logFileBase: 'model-discovery',
-  });
+  const timeoutMs = config.discoveryTimeoutMs;
+  const controller = new AbortController();
+  const onExternalAbort = (): void => controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) controller.abort();
+    else options.signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  timer.unref();
   try {
-    const session = await proc.newSession({ cwd });
-    return session.modelOptions().map((option) => ({
-      alias: option.value,
-      apiId:
-        typeof option.description === 'string' && option.description.length > 0
-          ? option.description
-          : option.value,
-      name: option.name ?? option.value,
-    }));
-  } finally {
-    await proc.terminate('model-discovery-done').catch(() => {
-      // already dead
+    const proc = await VibeAcpProcess.start({
+      vibeAcpPath: config.vibeAcpPath,
+      cwd,
+      abortWatchdogMs: config.abortWatchdogMs,
+      debug: config.debug,
+      logDir: options.logDir ?? defaultDebugLogDir(),
+      spawnChild: options.spawnChild,
+      onAnomaly: options.onAnomaly,
+      logFileBase: 'model-discovery',
+      signal: controller.signal,
     });
+    try {
+      const session = await proc.newSession({ cwd });
+      return session.modelOptions().map((option) => ({
+        alias: option.value,
+        apiId:
+          typeof option.description === 'string' && option.description.length > 0
+            ? option.description
+            : option.value,
+        name: option.name ?? option.value,
+      }));
+    } finally {
+      await proc.terminate('model-discovery-done').catch(() => {
+        // already dead
+      });
+    }
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new AcpClientError(
+        'protocol',
+        `model discovery was aborted (provider disposed) or timed out after ${timeoutMs} ms — ` +
+          `the discovery vibe-acp child was killed`
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (options.signal) options.signal.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -196,6 +236,11 @@ export function registerMistralProvider(
   // model at extension load, async — the load is not blocked on the spawn.
   // registerProvider after the initial load takes effect immediately (Pi docs),
   // so the models appear in the picker as soon as discovery resolves.
+  // The provider OWNS the abort hook: dispose() (session_shutdown) kills the
+  // in-flight discovery child, and the provider is checked for disposal again
+  // right before registerProvider so a disposed provider never registers.
+  const discoveryAbort = new AbortController();
+  provider.onDispose(() => discoveryAbort.abort());
   void (async (): Promise<void> => {
     try {
       const discovered = await discoverModels({
@@ -204,10 +249,12 @@ export function registerMistralProvider(
         spawnChild: deps.spawnChild,
         onAnomaly: deps.onAnomaly,
         logDir: deps.logDir,
+        signal: discoveryAbort.signal,
       });
       if (discovered.length === 0) {
         throw new Error(`the ${'model'} config option of session/new listed no models`);
       }
+      if (provider.isDisposed) return; // disposed during discovery: register nothing
       // cache: API id → alias for the provider's model routing (ADR-0007)
       provider.setAliasByApiId(new Map(discovered.map((d) => [d.apiId, d.alias])));
       const providerConfig: ProviderConfig = {

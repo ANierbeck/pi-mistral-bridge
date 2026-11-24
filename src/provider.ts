@@ -213,10 +213,27 @@ export class MistralProvider {
   private resourcesPromise: Promise<void> | null = null;
   private readonly live = new Map<string, LiveTurn>();
   private disposed = false;
+  /** Hooks run by dispose() (e.g. abort an in-flight model discovery). */
+  private readonly disposeHooks: Array<() => void> = [];
 
   constructor(options: MistralProviderOptions) {
     this.options = options;
     this.aliasByApiId = options.aliasByApiId ?? new Map();
+  }
+
+  /** True once dispose() ran; the extension entry checks this before registering. */
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
+  /**
+   * Registers a hook that {@link dispose} runs (immediately when already
+   * disposed). Used by the entry point to abort an in-flight model discovery
+   * so its `vibe-acp` child is killed with the provider (AGENTS.md §15).
+   */
+  onDispose(hook: () => void): void {
+    if (this.disposed) hook();
+    else this.disposeHooks.push(hook);
   }
 
   /** Installs the discovery result (api id → alias) once discovery finished. */
@@ -319,6 +336,13 @@ export class MistralProvider {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    for (const hook of this.disposeHooks.splice(0)) {
+      try {
+        hook();
+      } catch {
+        // a failing hook must not block the rest of the teardown
+      }
+    }
     await this.disposeResources();
     this.live.clear();
     this.sessions.clear();

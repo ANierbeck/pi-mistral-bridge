@@ -48,6 +48,7 @@ const CONFIG: BridgeConfig = {
   processIdleTimeoutMs: 600_000,
   toolPreTimeoutMs: 1_500,
   abortWatchdogMs: 5_000,
+  discoveryTimeoutMs: 30_000,
 };
 
 // The Pi model registered from the discovered API id; the alias is the

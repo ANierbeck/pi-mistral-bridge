@@ -38,6 +38,13 @@ export const VIBE_TURN_BUDGET_MS = 60_000;
  * (ADR-0003).
  */
 export const DEFAULT_ABORT_WATCHDOG_MS = 5_000;
+/**
+ * Model-discovery timeout (T5 slice C2): one short-lived `vibe-acp` process at
+ * extension load reads the `model` config option (ADR-0005). A hang (e.g. a
+ * wedged child) is killed after this time so the extension never blocks on
+ * discovery; `dispose()` aborts it even earlier.
+ */
+export const DEFAULT_DISCOVERY_TIMEOUT_MS = 30_000;
 
 /** AskVibe modes per ADR-0004 (design: `ask` / `plan` / `edit`, default `ask`). */
 export const ASK_VIBE_MODES = ['ask', 'plan', 'edit'] as const;
@@ -57,6 +64,7 @@ export interface BridgeConfig {
   processIdleTimeoutMs: number;
   toolPreTimeoutMs: number;
   abortWatchdogMs: number;
+  discoveryTimeoutMs: number;
 }
 
 export interface LoadConfigOptions {
@@ -105,6 +113,7 @@ interface ConfigDraft {
   processIdleTimeoutMs?: number;
   toolPreTimeoutMs?: number;
   abortWatchdogMs?: number;
+  discoveryTimeoutMs?: number;
   askVibe?: Partial<AskVibeConfig>;
 }
 
@@ -154,6 +163,10 @@ function applyLayer(
       }
       case 'abortWatchdogMs': {
         draft.abortWatchdogMs = requirePositiveMs(path, key, value);
+        break;
+      }
+      case 'discoveryTimeoutMs': {
+        draft.discoveryTimeoutMs = requirePositiveMs(path, key, value);
         break;
       }
       case 'toolPreTimeoutMs': {
@@ -246,6 +259,7 @@ export function loadConfig(cwd: string, options: LoadConfigOptions = {}): Bridge
     processIdleTimeoutMs: draft.processIdleTimeoutMs ?? DEFAULT_PROCESS_IDLE_TIMEOUT_MS,
     toolPreTimeoutMs: draft.toolPreTimeoutMs ?? DEFAULT_TOOL_PRE_TIMEOUT_MS,
     abortWatchdogMs: draft.abortWatchdogMs ?? DEFAULT_ABORT_WATCHDOG_MS,
+    discoveryTimeoutMs: draft.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
   };
   return deepFreeze(config);
 }
