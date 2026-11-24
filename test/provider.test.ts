@@ -49,6 +49,7 @@ const CONFIG: BridgeConfig = {
   toolPreTimeoutMs: 1_500,
   abortWatchdogMs: 5_000,
   discoveryTimeoutMs: 30_000,
+  startupDiscoveryTimeoutMs: 30_000,
   modelRefreshIntervalMs: 600_000,
 };
 

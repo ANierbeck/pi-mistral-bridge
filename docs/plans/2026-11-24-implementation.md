@@ -117,7 +117,8 @@ real `vibe-acp` only with per-run owner approval (`MISTRAL_BRIDGE_IT=1`).
     in-memory (src/models.ts) and re-discovers on every Pi start.
 - [ ] **T8 Docs + review.** README (install, config, both modes, verified
       Vibe versions, honest note on provider-mode policy risk per ADR-0002),
-      PI.md, then `requesting-code-review` with builtin `reviewer` (§1),
+      (PI.md was later dropped — pi.dev renders the package README; see
+      CHANGELOG), then `requesting-code-review` with builtin `reviewer` (§1),
       PR per §8.
   Docs written (README.md, PI.md, CHANGELOG.md Unreleased section,
   package.json description); the checkbox stays open until the code review

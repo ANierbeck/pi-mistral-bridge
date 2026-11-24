@@ -12,6 +12,11 @@
   ],
   "author": "ANierbeck",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ANierbeck/pi-mistral-bridge"
+  },
+  "homepage": "https://github.com/ANierbeck/pi-mistral-bridge#readme",
   "private": false,
   "type": "module",
   "main": "dist/index.js",
@@ -28,7 +33,6 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
-    "PI.md",
     "docs/adr"
   ],
   "scripts": {

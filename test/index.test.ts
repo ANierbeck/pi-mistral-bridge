@@ -21,6 +21,7 @@ import {
 import type { BridgeConfig } from '../src/config.ts';
 import {
   BRIDGE_API,
+  bridgeExtension,
   FALLBACK_CONTEXT_WINDOW,
   FALLBACK_MAX_TOKENS,
   registerMistralProvider,
@@ -46,6 +47,7 @@ const CONFIG: BridgeConfig = {
   toolPreTimeoutMs: 1_500,
   abortWatchdogMs: 5_000,
   discoveryTimeoutMs: 30_000,
+  startupDiscoveryTimeoutMs: 30_000,
   modelRefreshIntervalMs: 600_000,
 };
 
@@ -325,6 +327,128 @@ describe('registerMistralProvider: model discovery + registration (ADR-0005/0007
     } finally {
       await provider.dispose();
     }
+  });
+});
+
+// ---------------------------------------------------- async factory (startup race)
+//
+// Pi awaits an async extension factory before session_start and before queued
+// registerProvider calls are flushed (pi-coding-agent docs/extensions.md,
+// "Async factory functions"). The factory's returned promise therefore must
+// NOT resolve before the FIRST model discovery resolves — and must still
+// resolve after `startupDiscoveryTimeoutMs` when the discovery never does.
+
+describe('async extension factory: bounded await of the first model discovery', () => {
+  it('the default export is an async factory, so Pi awaits the returned promise before session_start / registerProvider flush', async () => {
+    const mod = await import('../src/index.ts');
+    expect(typeof mod.default).toBe('function');
+    // an async function returns a Promise — that is Pi's await point
+    expect(mod.default.constructor.name).toBe('AsyncFunction');
+  });
+
+  it('the factory promise does not resolve before the first discovery resolves (models registered before Pi first render)', async () => {
+    let releaseInit!: () => void;
+    const initGate = new Promise<void>((resolve) => {
+      releaseInit = resolve;
+    });
+    const fake = makeFakeSpawn({ onInitialize: () => initGate }); // discovery gated on initialize
+    const { pi, registrations } = makeFakePi();
+    const warns: string[] = [];
+    let factoryResolved = false;
+    const config: BridgeConfig = { ...CONFIG, discoveryTimeoutMs: 2_000 };
+    const factoryPromise = bridgeExtension(pi, config, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: (m) => warns.push(m),
+    }).then((wired) => {
+      factoryResolved = true;
+      return wired;
+    });
+    try {
+      await waitFor(() => fake.spawns.length === 1, 'discovery child spawned');
+      await sleep(100); // initialize still gated: the first discovery is unresolved
+      expect(factoryResolved).toBe(false); // the factory must still be waiting
+      expect(registrations).toEqual([]); // nothing registered yet
+      releaseInit();
+      const wired = await factoryPromise;
+      expect(factoryResolved).toBe(true);
+      // the provider was registered BEFORE the factory promise resolved
+      expect(registrations).toHaveLength(1);
+      expect(registrations[0].name).toBe('mistral-vibe');
+      expect(warns).toEqual([]);
+      await wired.provider.dispose();
+    } finally {
+      releaseInit(); // idempotent: a failing test must not hang on the gate
+      await factoryPromise.then(
+        (w) => w.provider.dispose(),
+        () => {}
+      );
+    }
+  });
+
+  it('the factory promise DOES resolve after startupDiscoveryTimeoutMs when the discovery never resolves (quiet warning; the background discovery keeps running)', async () => {
+    const fake = makeFakeSpawn({
+      onInitialize: () => new Promise(() => {}), // hangs until killed
+    });
+    const { pi, registrations } = makeFakePi();
+    const warns: string[] = [];
+    const config: BridgeConfig = {
+      ...CONFIG,
+      startupDiscoveryTimeoutMs: 150,
+      discoveryTimeoutMs: 60_000,
+    };
+    const start = Date.now();
+    const wired = await bridgeExtension(pi, config, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: (m) => warns.push(m),
+    });
+    const elapsed = Date.now() - start;
+    try {
+      expect(elapsed).toBeGreaterThanOrEqual(140);
+      expect(elapsed).toBeLessThan(5_000);
+      expect(registrations).toEqual([]); // discovery still in flight: nothing registered yet
+      expect(warns).toHaveLength(1); // a QUIET warning, not an error
+      expect(warns[0]).toContain('150 ms');
+      expect(warns[0]).toContain('continuing startup');
+      expect(warns[0]).not.toContain('model discovery failed');
+      // the startup timeout did NOT kill the discovery child — it keeps running
+      expect(fake.children[0].killedWith).toEqual([]);
+      await wired.provider.dispose();
+      await waitFor(() => fake.children[0].killedWith.length > 0, 'discovery child killed', 5_000);
+      await sleep(200); // let the aborted discovery's catch handler run
+      expect(warns).toHaveLength(1); // still just the startup warning: quiet shutdown
+    } finally {
+      await wired.provider.dispose();
+    }
+  });
+
+  it('dispose during the startup wait stays silent (no startup-timeout warning, no discovery-failure warning — 828f223 behavior)', async () => {
+    const fake = makeFakeSpawn({
+      onInitialize: () => new Promise(() => {}), // hangs until killed
+    });
+    const { pi, registrations } = makeFakePi();
+    const warns: string[] = [];
+    const config: BridgeConfig = {
+      ...CONFIG,
+      startupDiscoveryTimeoutMs: 60_000,
+      discoveryTimeoutMs: 60_000,
+    };
+    const { provider, startupReady } = wireExtension(pi, config, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: (m) => warns.push(m),
+    });
+    await waitFor(() => fake.spawns.length === 1, 'discovery child spawned');
+    await provider.dispose(); // session_shutdown while the factory would still be waiting
+    await startupReady; // resolves quietly: the dispose-abort is an intentional shutdown
+    await waitFor(() => fake.children[0].killedWith.length > 0, 'discovery child killed', 5_000);
+    await sleep(200); // let the aborted discovery's catch handler run
+    expect(warns).toEqual([]);
+    expect(registrations).toEqual([]);
   });
 });
 
