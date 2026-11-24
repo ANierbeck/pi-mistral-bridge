@@ -1,8 +1,36 @@
 # pi-mistral-bridge
 
-A Pi coding-agent extension that makes Mistral models usable inside Pi by
-driving the official Mistral Vibe harness (`vibe-acp`) over the Agent Client
-Protocol (ACP). It has two modes:
+## What this is — and what it is not
+
+**What it is.** A [Pi](https://github.com/earendil-works/pi) extension that
+lets you use your **Mistral Vibe subscription models inside Pi** by driving
+**your own installed `vibe-acp`** over the Agent Client Protocol (ACP). Pi owns
+the agent loop and the tools; every tool call Vibe makes is executed by Pi.
+Usage bills against your **Vibe allowance**, not the API allowance: Mistral
+accepts "Mistral harnesses via ACP with third-party tools", and the announced
+billing change from 2026-12-01 moves usage of third-party harnesses that do
+not go through a Mistral harness onto the API allowance — this bridge keeps
+you on the Vibe allowance because it drives Vibe itself.
+
+**What it is not.**
+
+- **Not a Mistral API-key client** — it never calls the Mistral HTTP API
+  directly and never spoofs a client identity.
+- **Not a Vibe credential store** — it never reads, copies or forwards
+  anything under `~/.vibe/`; authentication is Vibe's own business
+  (`vibe-acp --setup`). In the ACP `initialize` handshake the bridge
+  identifies itself honestly as `pi-mistral-bridge` with its real version.
+- **Not a patch of Vibe** — it uses only the documented ACP protocol and
+  `vibe-acp` CLI flags.
+- **Not a replacement for the Vibe CLI** — run `vibe` yourself as usual.
+
+**Why it works.** `vibe-acp` speaks ACP natively (verified against
+`vibe-acp` 3.1.4): the bridge spawns one `vibe-acp` process per model
+(`VIBE_ACTIVE_MODEL`), and the tool calls Vibe makes are parked and executed
+by Pi through a loopback-only MCP bridge (`127.0.0.1` only, random port,
+per-session bearer token).
+
+It has two modes:
 
 - **Provider mode** — the models your `vibe-acp` reports appear in Pi's model
   picker under a dedicated provider (default `mistral-vibe`); Pi owns the
@@ -10,13 +38,12 @@ Protocol (ACP). It has two modes:
 - **AskVibe mode** — a Pi tool (`ask_vibe`) that delegates a self-contained
   task to Vibe as a sub-agent with Vibe's own tools.
 
-The bridge talks to Mistral **only through your own `vibe-acp` process** over
-ACP. It never calls the Mistral HTTP API directly, never spoofs a client
-identity, and never reads, copies or forwards Vibe's credentials —
-authentication is Vibe's business (`vibe-acp --setup`). In the ACP
-`initialize` handshake it identifies itself honestly as `pi-mistral-bridge`
-with its real version. Usage is consumed via your own Vibe setup, exactly as
-when you run Vibe yourself.
+**Always address bridge models as `mistral-vibe/<apiModelId>`.** Pi already
+has a builtin `mistral` provider (a plain HTTP API client keyed by a Mistral
+API key). The bridge registers its **own** provider (default name
+`mistral-vibe`, configurable via `providerName`), so `mistral/<id>` resolves
+to Pi's builtin HTTP provider — **not** to this bridge. Use
+`mistral-vibe/<apiModelId>` everywhere (`--model`, `/model`, `pi -p`, …).
 
 **Not affiliated with Mistral.** This is an independent bridge.
 
@@ -31,13 +58,13 @@ when you run Vibe yourself.
 
 ## Install
 
-Once published on npm:
+Once this package is published on npm:
 
 ```bash
 pi install npm:pi-mistral-bridge
 ```
 
-From a local checkout (until then):
+Until then, from a local checkout:
 
 ```bash
 npm ci
@@ -49,11 +76,14 @@ Restart or `/reload` Pi afterwards.
 
 ## Quick start
 
-1. Start Pi. Within a few seconds the provider `mistral-vibe` appears in the
-   model picker, with exactly the models your `vibe-acp` reports for your
-   account (the list is discovered from Vibe, never hardcoded, and refreshed
-   in the background).
-2. Select a `mistral-vibe` model and chat as usual — Pi runs the agent loop.
+1. Start Pi. The extension factory awaits the first model discovery (bounded
+   by `startupDiscoveryTimeoutMs`, default 10 s), so the provider
+   `mistral-vibe` is registered before Pi's first render with exactly the
+   models your `vibe-acp` reports for your account (the list is discovered
+   from Vibe, never hardcoded, and refreshed in the background).
+2. Select a `mistral-vibe/<apiModelId>` model and chat as usual — Pi runs the
+   agent loop. (Do not use `mistral/<id>`: that is Pi's builtin HTTP provider,
+   not this bridge — see the warning above.)
 3. To delegate a task to Vibe itself, ask the agent to use the `ask_vibe` tool
    (for example: "use ask_vibe to …"), or invoke `ask_vibe` directly from the
    input line.
@@ -114,6 +144,23 @@ explicitly enabled. The tool result includes a summary of changed files.
 Errors map like in provider mode, including the `Mistral Vibe quota exceeded`
 prefix for quota errors. See
 [ADR-0004](docs/adr/0004-askvibe-agent-mode-and-permission-bridge.md).
+
+## Limitations
+
+- **Models appear only after the first discovery.** The extension factory
+  waits for the first `vibe-acp` model-list discovery up to
+  `startupDiscoveryTimeoutMs` (default 10 s); on timeout startup continues
+  with a quiet warning and the models appear as soon as the discovery
+  finishes. The list is re-discovered in the background every
+  `modelRefreshIntervalMs` (default 30 min).
+- **Provider mode has a hard per-turn time budget.** Vibe enforces a 60 s
+  per-turn budget on tool calls and it is not configurable; the bridge
+  pre-emptively times Pi tools out at 55 s (`toolPreTimeoutMs`) and answers
+  with a "did not finish within `<n>` ms" result (see Provider mode above).
+- **AskVibe `plan` mode no longer exists on `vibe-acp` >= 3.0** and falls
+  back to `ask` (likewise `edit` falls back `accept-edits` → `ask`).
+- **Verified against `vibe-acp` 3.1.4 only** (see "Verified against" below);
+  other Vibe versions are unverified.
 
 ## Configuration
 
