@@ -54,6 +54,12 @@ import { canonicalJson } from './transcript.ts';
 export const DEFAULT_BATCH_WINDOW_MS = 100;
 /** Default MCP server name (Vibe sees `{server}_pi__<tool>`; T5 may override). */
 export const DEFAULT_MCP_SERVER_NAME = 'pi';
+/**
+ * Hard cap on the HTTP request body (4 MiB). Authorization is checked before
+ * the body is read, and a body over the cap is answered 413 while the rest is
+ * drained and discarded, never buffered (AGENTS.md §15).
+ */
+export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 /** A Pi tool of the owning session, as far as the MCP bridge needs it. */
 export interface BridgeTool {
@@ -314,10 +320,8 @@ export async function createMcpBridge(options: CreateMcpBridgeOptions = {}): Pro
   }
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
-    const raw = Buffer.concat(chunks).toString('utf8');
-
+    // Authorization FIRST, before reading the body: an unauthorized request
+    // must not make the server consume/buffer its payload (AGENTS.md §15).
     if (req.headers['authorization'] !== `Bearer ${token}`) {
       stats.unauthorizedRequests += 1;
       log('unauthorized', { method: req.method, url: req.url, count: stats.unauthorizedRequests });
@@ -330,6 +334,27 @@ export async function createMcpBridge(options: CreateMcpBridgeOptions = {}): Pro
       res.end();
       return;
     }
+
+    // Body read under a hard cap: past MAX_BODY_BYTES the request is answered
+    // 413 and the remaining chunks are drained without buffering.
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let tooLarge = false;
+    for await (const chunk of req) {
+      if (tooLarge) continue; // drain and discard, never buffer
+      size += (chunk as Buffer).length;
+      if (size > MAX_BODY_BYTES) {
+        tooLarge = true;
+        chunks.length = 0;
+        log('body_too_large', { size, max: MAX_BODY_BYTES });
+        res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
+        res.end(JSON.stringify({ error: `request body exceeds ${MAX_BODY_BYTES} bytes` }));
+        continue;
+      }
+      chunks.push(chunk as Buffer);
+    }
+    if (tooLarge) return;
+    const raw = Buffer.concat(chunks).toString('utf8');
 
     let body: unknown;
     try {

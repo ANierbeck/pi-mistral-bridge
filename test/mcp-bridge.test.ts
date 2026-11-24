@@ -11,6 +11,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createMcpBridge,
+  MAX_BODY_BYTES,
   type BridgeTool,
   type CreateMcpBridgeOptions,
   type McpBridge,
@@ -168,6 +169,79 @@ describe('createMcpBridge', () => {
     for (const line of lines) expect(line).not.toContain(bridge.token);
     expect(lines.some((l) => l.includes('unauthorized'))).toBe(true);
   });
+
+  it('checks Authorization BEFORE reading the body: an unauthorized oversized body gets 401 without being consumed', async () => {
+    const lines: string[] = [];
+    const bridge = await makeBridge({}, lines);
+    const total = 5 * 1024 * 1024; // over the 4 MiB cap
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const n = Math.min(64 * 1024, total - pulled);
+        pulled += n;
+        controller.enqueue(new Uint8Array(n));
+        if (pulled >= total) controller.close();
+      },
+    });
+    const res = await fetch(bridge.url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: 'Bearer wrong-token',
+      },
+      body,
+      duplex: 'half',
+    } as unknown as RequestInit);
+    expect(res.status).toBe(401); // not 413: the cap is only reached after auth
+    await res.text();
+    expect(bridge.stats.unauthorizedRequests).toBe(1);
+    expect(lines.some((l) => l.includes('"ev":"unauthorized"'))).toBe(true);
+    // the server answered before consuming the body (auth checked first):
+    // the stream was pulled far less than the full 5 MiB
+    expect(pulled).toBeLessThan(total);
+  });
+
+  it('answers 413 for an authorized body over 4 MiB without buffering it, and accepts one just under the cap', async () => {
+    const lines: string[] = [];
+    const bridge = await makeBridge({}, lines);
+    const postRaw = (payload: string): Promise<Response> =>
+      fetch(bridge.url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          authorization: `Bearer ${bridge.token}`,
+        },
+        body: payload,
+      });
+
+    const oversized = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'pi__echo', arguments: { text: 'x'.repeat(5 * 1024 * 1024) } },
+    });
+    expect(oversized.length).toBeGreaterThan(MAX_BODY_BYTES);
+    const big = await postRaw(oversized);
+    expect(big.status).toBe(413);
+    await big.text();
+    expect(lines.some((l) => l.includes('"ev":"body_too_large"'))).toBe(true);
+
+    // just under the cap reaches the MCP layer: the call parks and the
+    // pre-timeout (1 s in makeBridge) answers it, so the request completes
+    const under = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'pi__echo', arguments: { text: 'x'.repeat(MAX_BODY_BYTES - 8192) } },
+    });
+    expect(under.length).toBeLessThan(MAX_BODY_BYTES);
+    const res = await postRaw(under);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('did not finish within'); // pre-timeout answered the parked call
+  }, 15_000);
 
   it('lists the current Pi tools as pi__<name> with their JSON schemas and mirrors setTools', async () => {
     const bridge = await makeBridge();
