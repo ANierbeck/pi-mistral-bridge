@@ -39,7 +39,7 @@ const LOG_DIR = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-askvibe-logs-'));
 
 const CONFIG: BridgeConfig = {
   vibeAcpPath: 'vibe-acp',
-  providerName: 'mistral-vibe',
+  providerName: 'mistral-bridge',
   askVibe: { enabled: true, defaultMode: 'ask', autoApprove: false },
   debug: false,
   processIdleTimeoutMs: 600_000,

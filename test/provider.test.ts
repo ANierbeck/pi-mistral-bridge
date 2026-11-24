@@ -42,7 +42,7 @@ const LOG_DIR = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-provider-logs-'));
 
 const CONFIG: BridgeConfig = {
   vibeAcpPath: 'vibe-acp',
-  providerName: 'mistral-vibe',
+  providerName: 'mistral-bridge',
   askVibe: { enabled: false, defaultMode: 'ask', autoApprove: false },
   debug: false,
   processIdleTimeoutMs: 600_000,
@@ -59,8 +59,8 @@ const CONFIG: BridgeConfig = {
 const MODEL: Model<Api> = {
   id: 'devstral-small-latest',
   name: 'Devstral Small',
-  api: 'mistral-vibe-acp',
-  provider: 'mistral-vibe',
+  api: 'mistral-bridge-acp',
+  provider: 'mistral-bridge',
   baseUrl: 'vibe-acp',
   input: ['text'],
   reasoning: false,

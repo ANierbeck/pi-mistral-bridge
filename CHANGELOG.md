@@ -53,9 +53,9 @@ Semantic Versioning.
 
 - **Startup race:** the extension factory is now async and awaits the first
   model discovery — bounded by the new `startupDiscoveryTimeoutMs` config key
-  (default 10000 ms) — so on a fast discovery the `mistral-vibe` models are
+  (default 10000 ms) — so on a fast discovery the `mistral-bridge` models are
   registered before Pi's first render. `pi -p`, `--list-models` and
-  `--model mistral-vibe/<id>` issued right after Pi start no longer silently
+  `--model mistral-bridge/<id>` issued right after Pi start no longer silently
   fall back to Pi's builtin `mistral` HTTP provider. On timeout a quiet
   warning is logged and startup continues; the discovery itself keeps running
   in the background. Red-first tested against the in-process fake ACP agent
@@ -69,7 +69,7 @@ Semantic Versioning.
   client, not a Vibe credential store, not a Vibe patch, and not a Vibe CLI
   replacement; usage bills against the Vibe allowance because Mistral
   accepts Mistral harnesses via ACP with third-party tools), an explicit
-  warning to always address bridge models as `mistral-vibe/<apiModelId>`
+  warning to always address bridge models as `mistral-bridge/<apiModelId>`
   (`mistral/<id>` resolves to Pi's builtin HTTP provider, not the bridge), an
   Install section and an honest limitations section (models appear after the
   first discovery; provider-mode 60 s per-turn budget with 55 s pre-timeout;

@@ -36,7 +36,7 @@ Models and auth come from Vibe (ADR-0005).
 
 ```
  pi (agent loop, tools, UI)
-   │  registerProvider("mistral-vibe", streamSimple) · registerTool("AskVibe")
+   │  registerProvider("mistral-bridge", streamSimple) · registerTool("AskVibe")
    ▼
  ┌──────────────────── pi-mistral-bridge ─────────────────────┐
  │ src/index.ts         extension entry, lifecycle, config    │
@@ -88,7 +88,7 @@ calls are parked → abort open prompt, mark dirty.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `vibeAcpPath` | `vibe-acp` (PATH) | executable to spawn |
-| `providerName` | `mistral-vibe` | Pi provider id |
+| `providerName` | `mistral-bridge` | Pi provider id |
 | `askVibe.enabled` | `true` | register the AskVibe tool |
 | `askVibe.defaultMode` | `ask` | `ask` / `plan` / `edit` |
 | `askVibe.autoApprove` | `false` | approve Vibe permissions without UI |

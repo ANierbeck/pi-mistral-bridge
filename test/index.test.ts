@@ -40,7 +40,7 @@ const LOG_DIR = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-index-logs-'));
 
 const CONFIG: BridgeConfig = {
   vibeAcpPath: 'vibe-acp',
-  providerName: 'mistral-vibe',
+  providerName: 'mistral-bridge',
   askVibe: { enabled: false, defaultMode: 'ask', autoApprove: false },
   debug: false,
   processIdleTimeoutMs: 600_000,
@@ -55,7 +55,7 @@ const MODEL: Model<Api> = {
   id: 'devstral-small-latest',
   name: 'Devstral Small',
   api: BRIDGE_API,
-  provider: 'mistral-vibe',
+  provider: 'mistral-bridge',
   baseUrl: 'vibe-acp',
   input: ['text'],
   reasoning: false,
@@ -141,7 +141,7 @@ describe('registerMistralProvider: model discovery + registration (ADR-0005/0007
       expect(warns).toEqual([]);
 
       const { name, config } = registrations[0];
-      expect(name).toBe('mistral-vibe');
+      expect(name).toBe('mistral-bridge');
       // models come from the fake configOptions: id = API id (description), alias = value
       expect(config.models).toEqual([
         {
@@ -249,7 +249,7 @@ describe('registerMistralProvider: model discovery + registration (ADR-0005/0007
     expect(reserved.has('anthropic')).toBe(true);
     expect(reserved.has('openai')).toBe(true);
     expect(reserved.has('google')).toBe(true);
-    expect(reserved.has('mistral-vibe')).toBe(false);
+    expect(reserved.has('mistral-bridge')).toBe(false);
   });
 
   it('kills a hung discovery child after discoveryTimeoutMs and registers nothing', async () => {
@@ -375,7 +375,7 @@ describe('async extension factory: bounded await of the first model discovery', 
       expect(factoryResolved).toBe(true);
       // the provider was registered BEFORE the factory promise resolved
       expect(registrations).toHaveLength(1);
-      expect(registrations[0].name).toBe('mistral-vibe');
+      expect(registrations[0].name).toBe('mistral-bridge');
       expect(warns).toEqual([]);
       await wired.provider.dispose();
     } finally {
@@ -526,7 +526,7 @@ const MODEL_ID_PATTERNS: ReadonlyArray<{ name: string; re: RegExp; why: string }
 // fails if a future pattern ever matches one of them.
 const ALLOWED_MODEL_TOKENS: readonly string[] = [
   "'mistral'", // Pi's builtin provider name (PI_BUILTIN_MISTRAL_PROVIDER, src/index.ts)
-  "'mistral-vibe'", // the bridge's own default provider name (DEFAULT_PROVIDER_NAME, src/config.ts)
+  "'mistral-bridge'", // the bridge's own default provider name (DEFAULT_PROVIDER_NAME, src/config.ts)
   'mistral-bridge', // config file name / log dir / bridge config keys (mistral-bridge.json)
   'pi-mistral-bridge', // ACP client identity (AGENTS.md §14, ACP_CLIENT_NAME)
   'mistral.vibe.', // vibe-acp extension _meta key namespace (src/vibe-protocol.ts)
@@ -602,7 +602,7 @@ describe('wireExtension: AskVibe tool registration (ADR-0004, askVibe.enabled)',
       expect(tools.map((t) => t.name)).toEqual(['ask_vibe']);
       expect(tools[0].definition.parameters).toBeDefined();
       await waitFor(() => registrations.length === 1, 'provider registration');
-      expect(registrations[0].name).toBe('mistral-vibe');
+      expect(registrations[0].name).toBe('mistral-bridge');
       expect(askVibe).not.toBeNull();
     } finally {
       await provider.dispose();

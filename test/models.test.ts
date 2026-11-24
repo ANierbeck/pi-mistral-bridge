@@ -37,7 +37,7 @@ const LOG_DIR = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-models-logs-'));
 
 const CONFIG: BridgeConfig = {
   vibeAcpPath: 'vibe-acp',
-  providerName: 'mistral-vibe',
+  providerName: 'mistral-bridge',
   askVibe: { enabled: false, defaultMode: 'ask', autoApprove: false },
   debug: false,
   processIdleTimeoutMs: 600_000,
@@ -462,7 +462,7 @@ const WIRED_MODEL: Model<Api> = {
   id: 'api-id-one',
   name: 'Model One',
   api: BRIDGE_API,
-  provider: 'mistral-vibe',
+  provider: 'mistral-bridge',
   baseUrl: 'vibe-acp',
   input: ['text'],
   reasoning: false,
@@ -505,7 +505,7 @@ describe('T7 wiring through registerMistralProvider (src/index.ts)', () => {
       ];
       await waitFor(() => registrations.length === 2, 'refresh re-registration');
       // the FULL list, not a delta
-      expect(registrations[1].name).toBe('mistral-vibe');
+      expect(registrations[1].name).toBe('mistral-bridge');
       expect(registrations[1].config.models.map((m: any) => m.id)).toEqual([
         'api-id-one',
         'api-id-two',

@@ -19,7 +19,13 @@ export const GLOBAL_CONFIG_PATH_PARTS = ['.pi', 'agent', 'mistral-bridge.json'] 
 export const PROJECT_CONFIG_PATH_PARTS = ['.pi', 'mistral-bridge.json'] as const;
 
 export const DEFAULT_VIBE_ACP_PATH = 'vibe-acp';
-export const DEFAULT_PROVIDER_NAME = 'mistral-vibe';
+/**
+ * Default name of the Pi provider the bridge registers: chosen to signal
+ * "bridge provider" (modelled on pi-claude-bridge), so models are addressed
+ * as `mistral-bridge/<apiModelId>`; user-overridable via the `providerName`
+ * config key.
+ */
+export const DEFAULT_PROVIDER_NAME = 'mistral-bridge';
 /** ADR-0007: idle reaper for the per-model `vibe-acp` process pool — 10 min. */
 export const DEFAULT_PROCESS_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 /**
