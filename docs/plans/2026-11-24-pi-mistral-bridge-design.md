@@ -3,7 +3,7 @@
 ## Status
 
 Approved (2026-11-24) — design agreed with the owner in the brainstorming
-session. ADR-0001 … ADR-0005 are Proposed pending owner acceptance.
+session. ADR-0001 … ADR-0005 accepted by the owner (2026-11-24).
 Next step: spike (step 1 below).
 
 ## Problem

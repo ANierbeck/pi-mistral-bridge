@@ -14,11 +14,11 @@ ADRs record architecture decisions as they were made. Rules (AGENTS.md §12):
 
 | ADR | Title | Status | Superseded by |
 |-----|-------|--------|---------------|
-| [0001](0001-drive-vibe-through-acp.md) | Drive Mistral Vibe through ACP (`vibe-acp`) | Proposed | — |
-| [0002](0002-provider-mode-pi-owns-the-agent-loop.md) | Provider mode: Pi owns the agent loop, Pi tools via MCP | Proposed | — |
-| [0003](0003-history-delta-with-rebuild-fallback.md) | History: delta prompts with rebuild fallback | Proposed | — |
-| [0004](0004-askvibe-agent-mode-and-permission-bridge.md) | AskVibe agent mode and permission bridge | Proposed | — |
-| [0005](0005-models-and-auth-come-from-vibe.md) | Models and authentication come from Vibe | Proposed | — |
+| [0001](0001-drive-vibe-through-acp.md) | Drive Mistral Vibe through ACP (`vibe-acp`) | Accepted | — |
+| [0002](0002-provider-mode-pi-owns-the-agent-loop.md) | Provider mode: Pi owns the agent loop, Pi tools via MCP | Accepted | — |
+| [0003](0003-history-delta-with-rebuild-fallback.md) | History: delta prompts with rebuild fallback | Accepted | — |
+| [0004](0004-askvibe-agent-mode-and-permission-bridge.md) | AskVibe agent mode and permission bridge | Accepted | — |
+| [0005](0005-models-and-auth-come-from-vibe.md) | Models and authentication come from Vibe | Accepted | — |
 
 ## Template
 
