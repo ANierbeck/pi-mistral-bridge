@@ -436,6 +436,9 @@ export class MistralProvider {
       mcpServer: this.bridgeServer(),
     });
     state.acpSessionId = session.sessionId;
+    // the state now belongs to the NEW model alias, so later calls on the same
+    // model delta/continue instead of rebuilding on every call (ADR-0007)
+    state.modelAlias = modelAlias;
     state.systemPromptDigest = hashText(systemPrompt);
     const transcript = renderTranscript(context.messages);
     const promptText = systemPrompt ? `${systemPrompt}\n\n${transcript}` : transcript;

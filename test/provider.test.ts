@@ -66,7 +66,17 @@ const MODEL: Model<Api> = {
   maxTokens: 8_192,
 };
 
-const ALIAS_BY_API_ID = new Map([['devstral-small-latest', 'devstral-small']]);
+const ALIAS_BY_API_ID = new Map([
+  ['devstral-small-latest', 'devstral-small'],
+  ['mistral-medium-3.5', 'mistral-medium-3.5'],
+]);
+
+/** A second Pi model routing to a different Vibe alias (pool key, ADR-0007). */
+const MODEL2: Model<Api> = {
+  ...MODEL,
+  id: 'mistral-medium-3.5',
+  name: 'Mistral Medium 3.5',
+};
 
 const TOOLS: Tool[] = [
   {
@@ -641,6 +651,115 @@ describe('MistralProvider.streamSimple: turn scope of the bridge de-dup cache (A
       expect(text).not.toContain('round2:first');
       expect(h.sessionNews()).toBe(1);
       expect(h.prompts()).toHaveLength(1);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+});
+
+describe('MistralProvider.streamSimple: model switch (ADR-0007)', () => {
+  const sessionNewsAll = (h: ProviderHarness): number =>
+    h.fake.agents.reduce(
+      (n, agent) => n + agent.recorded.filter((r) => r.method === 'session/new').length,
+      0
+    );
+  const promptsOf = (h: ProviderHarness, agentIndex: number) =>
+    h.fake.agents[agentIndex]?.recorded.filter((r) => r.method === 'session/prompt') ?? [];
+
+  it('switch rebuilds once, then the new model can delta on its own session', async () => {
+    const h = makeProvider({ promptScript: textTurnScript });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(sessionNewsAll(h)).toBe(1);
+
+      // model switch -> rebuild on a second vibe-acp process (pool key = alias)
+      const stream2 = h.provider.streamSimple(
+        MODEL2,
+        contextOf([user('hi'), first.message, user('again')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      expect(sessionNewsAll(h)).toBe(2);
+      expect(h.fake.spawns[1].env[VIBE_ENV.ACTIVE_MODEL]).toBe('mistral-medium-3.5');
+
+      // the state must now carry the NEW alias: the next call on MODEL2 is a
+      // delta on the second session, not another rebuild
+      const stream3 = h.provider.streamSimple(
+        MODEL2,
+        contextOf([user('hi'), first.message, user('again'), second.message, user('more')]),
+        { sessionId: 'pi-1' }
+      );
+      const third = await collectStream(stream3);
+      expect(third.message.stopReason).toBe('stop');
+      expect(sessionNewsAll(h)).toBe(2); // no third session
+      const promptsAgent2 = promptsOf(h, 1);
+      expect(promptsAgent2).toHaveLength(2);
+      expect(promptsAgent2[1].params.prompt[0].text).toBe('more'); // delta, not full transcript
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('switch rebuilds once, then the new model can continueToolResults on its parked prompt', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        const promptText = params.prompt[0]?.type === 'text' ? params.prompt[0].text : '';
+        if (!promptText.includes('tool please')) return textTurnScript(params, agent, fake);
+        const sessionId = params.sessionId;
+        await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'hi' });
+        const client = await h.mcpClient();
+        const result = (await client.callTool({
+          name: 'pi__echo',
+          arguments: { text: 'hi' },
+        })) as { content: Array<{ text?: string }> };
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `tool said: ${result.content[0].text}` },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('stop');
+
+      // switch to MODEL2, which parks a tool batch on the second process
+      const stream2 = h.provider.streamSimple(
+        MODEL2,
+        contextOf([user('hi'), first.message, user('tool please')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('toolUse');
+      const call = second.message.content.find((b) => b.type === 'toolCall');
+      if (call?.type !== 'toolCall') throw new Error('expected a toolCall');
+      expect(sessionNewsAll(h)).toBe(2);
+
+      // answering the batch on MODEL2 must continue the SAME parked prompt
+      // (no rebuild: the state carries the new alias after the switch)
+      const stream3 = h.provider.streamSimple(
+        MODEL2,
+        contextOf([
+          user('hi'),
+          first.message,
+          user('tool please'),
+          second.message,
+          toolResult(call.id, 'echo', 'tool output'),
+        ]),
+        { sessionId: 'pi-1' }
+      );
+      const third = await collectStream(stream3);
+      expect(third.message.stopReason).toBe('stop');
+      expect(third.message.content).toEqual([{ type: 'text', text: 'tool said: tool output' }]);
+      expect(sessionNewsAll(h)).toBe(2); // no rebuild after the switch
+      expect(promptsOf(h, 1)).toHaveLength(1); // no new prompt: the parked one resumed
     } finally {
       await h.provider.dispose();
     }
