@@ -250,10 +250,10 @@ to anything under Vibe's own directory.
 
 ## Development
 
-- Design: [docs/plans/2026-11-24-pi-mistral-bridge-design.md](docs/plans/2026-11-24-pi-mistral-bridge-design.md)
+- Design: `docs/plans/` in the repository (not shipped in the npm tarball)
 - Architecture decisions (ADRs): [docs/adr/](docs/adr/)
-- Implementation plan (T1–T8): [docs/plans/2026-11-24-implementation.md](docs/plans/2026-11-24-implementation.md)
-- Spike evidence: [docs/research/2026-11-24-vibe-acp-surface.md](docs/research/2026-11-24-vibe-acp-surface.md)
+- Implementation plan (T1–T8): `docs/plans/2026-11-24-implementation.md` in the repository
+- Spike evidence: `docs/research/2026-11-24-vibe-acp-surface.md` in the repository
 
 Gates before every commit: `npm run typecheck`, `npm run lint`,
 `npm run format:check`, `npx vitest run`, `npm run test:coverage`,
