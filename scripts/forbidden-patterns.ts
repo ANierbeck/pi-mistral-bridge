@@ -21,8 +21,11 @@ export const FORBIDDEN: readonly ForbiddenPattern[] = [
   // e-mail addresses and paths (profile URLs, mail addresses). Case-
   // sensitive on purpose: LICENSE and package.json deliberately carry the
   // capitalized legal name as copyright holder / author, which is the
-  // owner's explicit publication choice, not a leaked handle.
-  { name: 'owner handle', re: new RegExp(['anier', 'beck'].join('')) },
+  // owner's explicit publication choice, not a leaked handle. The npm
+  // scope '@anierbeck/' is equally an explicit public publication choice
+  // (npm scopes are lowercase by registry rule), so the negative lookbehind
+  // exempts exactly the '@'-prefixed scope and nothing else.
+  { name: 'owner handle', re: new RegExp(['(?<!@)', 'anier', 'beck'].join('')) },
   // The owner's first name must not appear as a standalone word. Split into
   // fragments so this file does not match itself.
   { name: 'owner first name', re: new RegExp(['\\b', 'ac', 'him', '\\b'].join(''), 'i') },
