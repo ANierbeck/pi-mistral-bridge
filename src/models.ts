@@ -284,6 +284,16 @@ export class ModelCatalog {
   }
 
   /**
+   * True after {@link dispose()}. When the catalog is disposed, an in-flight
+   * discovery is aborted INTENTIONALLY (its child is killed, AGENTS.md §15),
+   * so a rejection carrying the dispose-abort is a quiet shutdown, not a
+   * discovery failure — callers must not log it as an error.
+   */
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
+  /**
    * One discovery run: reads the `model` config option from a short-lived
    * discovery process, updates the catalog and publishes the full list via
    * `onModels` when anything changed. Rejects on timeout/abort/failure and

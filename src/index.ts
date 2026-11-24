@@ -204,12 +204,17 @@ export function registerMistralProvider(
     try {
       await catalog.discover();
     } catch (error) {
-      // register NOTHING on failure (an empty models list would replace the
-      // provider's list with nothing); the message tells the user what to do
-      warn(
-        `model discovery failed — no "${config.providerName}" models registered; if Vibe is not ` +
-          `signed in run \`vibe-acp --setup\`, then /reload. (${String(error)})`
-      );
+      // A dispose() during the in-flight discovery (session_shutdown) aborts it
+      // intentionally — the abort hook killed the discovery child (AGENTS.md
+      // §15). That is a quiet shutdown, not a discovery failure: no warning.
+      if (!catalog.isDisposed) {
+        // register NOTHING on failure (an empty models list would replace the
+        // provider's list with nothing); the message tells the user what to do
+        warn(
+          `model discovery failed — no "${config.providerName}" models registered; if Vibe is not ` +
+            `signed in run \`vibe-acp --setup\`, then /reload. (${String(error)})`
+        );
+      }
     }
   })();
 

@@ -289,9 +289,39 @@ describe('registerMistralProvider: model discovery + registration (ADR-0005/0007
     try {
       await waitFor(() => fake.spawns.length === 1, 'discovery child spawned');
       await provider.dispose(); // session_shutdown while discovery is in flight
-      await waitFor(() => warns.length === 1, 'discovery abort warning', 5_000);
+      await waitFor(() => fake.children[0].killedWith.length > 0, 'discovery child killed', 5_000);
+      await sleep(300); // let the aborted discovery reject and the catch handler run
+      // the dispose-abort is an intentional shutdown, not a discovery failure:
+      // no "model discovery failed" warning (see the quiet-shutdown test below)
+      expect(warns.filter((m) => m.includes('model discovery failed'))).toEqual([]);
       expect(registrations).toEqual([]); // the disposed check before registerProvider held
-      expect(fake.children[0].killedWith.length).toBeGreaterThan(0); // child killed via the abort hook
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  it('dispose() during the initial discovery is a quiet shutdown: no "model discovery failed" warning', async () => {
+    const fake = makeFakeSpawn({
+      onInitialize: () => new Promise(() => {}), // hangs until killed
+    });
+    const { pi, registrations } = makeFakePi();
+    const warns: string[] = [];
+    const provider = registerMistralProvider(pi, CONFIG, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: (m) => warns.push(m),
+    });
+    try {
+      await waitFor(() => fake.spawns.length === 1, 'discovery child spawned');
+      await provider.dispose(); // session_shutdown while discovery is in flight
+      await waitFor(() => fake.children[0].killedWith.length > 0, 'discovery child killed', 5_000);
+      await sleep(300); // let the aborted discovery reject and the catch handler run
+      // The abort is the catalog's own dispose() — an intentional shutdown that
+      // killed the child (AGENTS.md §15), not a discovery failure — so the
+      // "model discovery failed" error must NOT be logged.
+      expect(warns.filter((m) => m.includes('model discovery failed'))).toEqual([]);
+      expect(registrations).toEqual([]); // nothing registered
     } finally {
       await provider.dispose();
     }

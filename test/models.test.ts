@@ -182,6 +182,7 @@ describe('ModelCatalog.discover: model list from the ACP model config option (AD
     const pending = catalog.discover();
     await waitFor(() => fake.spawns.length === 1, 'discovery spawn');
     catalog.dispose();
+    expect(catalog.isDisposed).toBe(true); // the quiet-shutdown signal for callers
     await expect(pending).rejects.toThrow(/aborted/);
     expect(fake.children[0].killedWith.length).toBeGreaterThan(0);
     // a disposed catalog refuses new discoveries
