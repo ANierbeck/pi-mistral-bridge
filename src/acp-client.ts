@@ -710,67 +710,77 @@ export class VibeAcpProcess {
     }
     const spawnChild = options.spawnChild ?? defaultSpawnChild;
     const child = spawnChild(options.vibeAcpPath, [], env, options.cwd);
-    const debugLog = options.debug
-      ? new AcpDebugLog(options.logDir, options.logFileBase, [options.mcpServer.token])
-      : null;
-    if (!child.stdin || !child.stdout) {
-      child.kill('SIGKILL');
-      throw new AcpClientError('protocol', `${options.vibeAcpPath} did not provide stdio pipes`);
-    }
-    const base = acp.ndJsonStream(
-      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>
-    );
-    const stream = debugLog ? teeStream(base, debugLog) : base;
-
-    // Handlers only fire once the peer sends something, which happens after
-    // the initialize request below — by then procRef.current is set.
-    const procRef: { current: VibeAcpProcess | null } = { current: null };
-    const app = acp
-      .client({ name: ACP_CLIENT_NAME })
-      .onRequest(acp.CLIENT_METHODS.session_request_permission, ({ params }) => {
-        const proc = procRef.current;
-        if (!proc) throw acp.RequestError.internalError('ACP client is not connected yet');
-        return proc.handlePermissionRequest(params);
-      })
-      .onRequest('*', ({ method }) => {
-        debugLog?.write('system', { unexpected_client_request: method });
-        throw acp.RequestError.methodNotFound(method);
-      })
-      .onNotification(acp.CLIENT_METHODS.session_update, ({ params }) => {
-        procRef.current?.sessions.get(params.sessionId)?.handleUpdate(params.update);
-      })
-      .onNotification('*', () => {
-        // Unknown extension notifications (e.g. _config/changed) are ignored (AGENTS.md §16).
-      });
-    const conn = app.connect(stream);
-    const proc = new VibeAcpProcess(options, child, conn, debugLog);
-    procRef.current = proc;
-    child.on('exit', proc.handleChildExit);
-    if (child.stderr) {
-      if (debugLog) {
-        child.stderr.on('data', (chunk: Buffer) =>
-          debugLog.write('system', { stderr: String(chunk) })
-        );
-      } else {
-        child.stderr.resume();
-      }
-    }
     try {
-      // Honest client identification (AGENTS.md §14); no fs/terminal/elicitation
-      // capabilities, so Vibe never calls back into us beyond permissions.
-      await proc.request('initialize', {
-        protocolVersion: acp.PROTOCOL_VERSION,
-        clientInfo: acpClientInfo(),
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      });
+      const debugLog = options.debug
+        ? new AcpDebugLog(options.logDir, options.logFileBase, [options.mcpServer.token])
+        : null;
+      if (!child.stdin || !child.stdout) {
+        throw new AcpClientError('protocol', `${options.vibeAcpPath} did not provide stdio pipes`);
+      }
+      const base = acp.ndJsonStream(
+        Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+        Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>
+      );
+      const stream = debugLog ? teeStream(base, debugLog) : base;
+
+      // Handlers only fire once the peer sends something, which happens after
+      // the initialize request below — by then procRef.current is set.
+      const procRef: { current: VibeAcpProcess | null } = { current: null };
+      const app = acp
+        .client({ name: ACP_CLIENT_NAME })
+        .onRequest(acp.CLIENT_METHODS.session_request_permission, ({ params }) => {
+          const proc = procRef.current;
+          if (!proc) throw acp.RequestError.internalError('ACP client is not connected yet');
+          return proc.handlePermissionRequest(params);
+        })
+        .onRequest('*', ({ method }) => {
+          debugLog?.write('system', { unexpected_client_request: method });
+          throw acp.RequestError.methodNotFound(method);
+        })
+        .onNotification(acp.CLIENT_METHODS.session_update, ({ params }) => {
+          procRef.current?.sessions.get(params.sessionId)?.handleUpdate(params.update);
+        })
+        .onNotification('*', () => {
+          // Unknown extension notifications (e.g. _config/changed) are ignored (AGENTS.md §16).
+        });
+      const conn = app.connect(stream);
+      const proc = new VibeAcpProcess(options, child, conn, debugLog);
+      procRef.current = proc;
+      child.on('exit', proc.handleChildExit);
+      if (child.stderr) {
+        if (debugLog) {
+          child.stderr.on('data', (chunk: Buffer) =>
+            debugLog.write('system', { stderr: String(chunk) })
+          );
+        } else {
+          child.stderr.resume();
+        }
+      }
+      try {
+        // Honest client identification (AGENTS.md §14); no fs/terminal/elicitation
+        // capabilities, so Vibe never calls back into us beyond permissions.
+        await proc.request('initialize', {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientInfo: acpClientInfo(),
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
+        });
+      } catch (error) {
+        await proc.terminate('initialize-failed').catch(() => {
+          // the original error matters more
+        });
+        throw error;
+      }
+      return proc;
     } catch (error) {
-      await proc.terminate('initialize-failed').catch(() => {
-        // the original error matters more
-      });
+      // No orphan window (AGENTS.md §15): everything after spawnChild runs
+      // inside this try — any throw (debug-log mkdir, stream setup, connect,
+      // initialize) must not leak a running child.
+      child.kill('SIGKILL');
       throw error;
     }
-    return proc;
   }
 
   /** A prompt is running on one of this process's sessions. */

@@ -4,7 +4,7 @@
 // app, connected to the fake child's stdio through ndJsonStream — the same wire
 // shape the real vibe-acp speaks.
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -109,6 +109,8 @@ interface FakeAgentOptions {
 interface FakeBehavior {
   promptScript?: PromptScript;
   onCancel?: () => void;
+  /** When set, the fake agent's initialize handler throws (start must not orphan the child). */
+  failInitialize?: boolean;
 }
 
 function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
@@ -132,6 +134,7 @@ function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
     .agent({ name: 'fake-vibe-acp' })
     .onRequest(acp.AGENT_METHODS.initialize, async ({ params }) => {
       recorded.push({ method: 'initialize', params });
+      if (behavior.failInitialize) throw acp.RequestError.internalError('fake initialize failure');
       return {
         protocolVersion: acp.PROTOCOL_VERSION,
         agentCapabilities: {
@@ -255,6 +258,8 @@ function makePool(
     abortWatchdogMs?: number;
     promptScript?: PromptScript;
     onCancel?: () => void;
+    failInitialize?: boolean;
+    logDir?: string;
   } = {}
 ): Harness {
   const children: FakeVibeChild[] = [];
@@ -264,8 +269,9 @@ function makePool(
   const behavior: FakeBehavior = {
     promptScript: opts.promptScript,
     onCancel: opts.onCancel,
+    failInitialize: opts.failInitialize,
   };
-  const logDir = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-acp-logs-'));
+  const logDir = opts.logDir ?? mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-acp-logs-'));
   const spawnChild: SpawnChildFn = (command, args, env) => {
     spawns.push({ command, args, env });
     const child = new FakeVibeChild();
@@ -446,6 +452,37 @@ describe('VibeProcessPool: spawn, env, handshake, dispose', () => {
       await h.pool.dispose();
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('VibeAcpProcess.start failure paths (no orphan window, AGENTS.md §15)', () => {
+  it('kills the child with SIGKILL when the debug log dir cannot be created after spawn', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-block-'));
+    const blocker = join(parent, 'blocker');
+    writeFileSync(blocker, 'a file, not a dir');
+    try {
+      const h = makePool({ debug: true, logDir: join(blocker, 'logs') });
+      try {
+        await expect(h.pool.get('devstral-small')).rejects.toThrow();
+        expect(h.spawns).toHaveLength(1);
+        // the throw happened after spawnChild — the child must not be orphaned
+        expect(h.children[0].killedWith).toContain('SIGKILL');
+      } finally {
+        await h.pool.dispose();
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('kills the child when the initialize handshake fails', async () => {
+    const h = makePool({ failInitialize: true });
+    try {
+      await expect(h.pool.get('devstral-small')).rejects.toThrow();
+      expect(h.children[0].killedWith.length).toBeGreaterThan(0);
+    } finally {
+      await h.pool.dispose();
     }
   });
 });
