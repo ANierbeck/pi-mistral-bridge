@@ -371,8 +371,10 @@ notification `telemetry/send`; client-capability `_meta` keys `browser-auth-dele
   shows `args: []`). Fixed (`--vibe-arg=--legacy-harness`); a Stage-1 rerun confirmed the
   legacy backend starts, discovers our MCP server and reports no permission requests. No
   prompt was left to run on legacy.
-- Spike prompts used `auto-approve` mode with builtin tools still visible. The prompts were
-  synthetic and the cwd was this worktree.
+- Prompts A and B used `auto-approve` mode with builtin tools still visible; prompt C ran in
+  the default `accept-edits` mode (it produced the one `session/request_permission`). The
+  prompts were synthetic and the cwd was this worktree. Controller check of the raw logs:
+  exactly one `session/prompt` in each of the three stage-2 runs, none in stage 1.
 - Nothing under `~/.vibe/` was read except directory listings and Vibe's own MCP-descriptor
   cache files (tool schemas only, headers not read). `config.toml` mtime was unchanged.
 - Everything about `--legacy-harness` behaviour, the >60 s timeout, `set_config_option
