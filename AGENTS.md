@@ -219,13 +219,35 @@ changing behaviour.
   ADR; an ADR never cites forward. The index in `docs/adr/README.md` is the
   only place that records which ADR supersedes which.
 
-## 13. Model use: the expensive model plans, cheap workers do mechanical steps
+## 13. Model use: the controller plans, subagents on cheaper models implement
 
-- The expensive model plans, decides and judges (design, review, final
-  verification). Mechanical steps — gate runs, log scans, searches, bulk
-  reads, applying a fully specified edit — go to a cheaper worker.
-- This is the standing authorisation for subagent delegation of the
-  mechanical part. Keep one writer per worktree.
+- **Owner rule 2026-11-24: every implementation in a session runs in
+  subagents on a cheaper model.** The session's own (expensive) model is the
+  *controller*: it plans, writes fully specified task briefs, decides,
+  reviews and runs the final verification. It does not write production
+  code, tests or spike scripts itself.
+- Model choice: implementers run on a cheaper model than the controller —
+  resolve it with `resolve_model_group` (`standard` for normal
+  implementation, `simple` for mechanical steps) or pick the cheaper
+  sibling of the controller's family when a task needs more strength. The
+  controller's model is reserved for planning, gating reviews (§1) and the
+  final judgement. Name the model used in the report.
+- Mechanical steps — gate runs, log scans, searches, bulk reads, applying a
+  fully specified edit — go to the cheapest capable worker
+  (`worker_step`, `bulk_read`, or a subagent).
+- This rule is the standing authorisation for subagent delegation required
+  by the subagent guidance. Dispatch with the `subagent` tool (builtin
+  `worker` for implementation, `reviewer` for reviews, `scout` for recon) —
+  never with `pi -p` from bash.
+- **One writer per worktree.** Parallel implementers only in separate
+  worktrees (§17), and only for tasks that share no files.
+- A task brief is self-contained: goal, files, constraints from this file
+  (§4 red-first, §14–§16), acceptance criteria, the exact gate commands, and
+  — for anything that talks to the real `vibe-acp` — an explicit allowance
+  budget (max prompts, which model) that the subagent must not exceed.
+- The controller never trusts a subagent's "done": it reads the diff and
+  re-runs (or has a worker re-run) the gates before accepting a task
+  (`verification-before-completion`).
 
 ## 14. Stay on the sanctioned Mistral path
 
@@ -276,3 +298,31 @@ The bridge must stay on exactly that path:
 - Every Vibe-specific ACP extension method or `_meta` field the bridge uses
   is listed in one module (`src/vibe-protocol.ts`) so a Vibe upgrade has one
   place to check.
+
+## 17. Development workflow: pi-superpowers skills, adapted to this repo
+
+The pi-superpowers skills (paths in the session's skill listing) are the
+default workflow. **Where a skill conflicts with this file, this file wins.**
+
+| Phase | Skill | How it is used here |
+|-------|-------|---------------------|
+| New feature / behaviour change | `brainstorming` | One question at a time; result is a design in `docs/plans/` (§11) and, for architecture choices, Proposed ADRs (§12). No code before the owner approved the design. |
+| Plan | `writing-plans` | Saved as `docs/plans/YYYY-MM-DD-<topic>.md`. The §11 headers (Status, Problem, Solution, Open decisions, Verified against) come first, then the skill's task list. One problem per plan. Committed before execution. |
+| Isolate | `using-git-worktrees` | Project-local `.worktrees/<branch>` (already in `.gitignore`). Branch names `feat/…`, `fix/…`, `docs/…`, `spike/…`. Baseline gates must be green before the first task. |
+| Execute | `subagent-driven-development` | **Default.** Implementer = builtin `worker` on a cheaper model (§13); spec reviewer and code-quality reviewer = builtin `reviewer`. Dispatched via the `subagent` tool, not `pi -p`. Progress tracked with `plan_tracker`. |
+| Execute in parallel | `dispatching-parallel-agents` | Only for tasks with no shared files and no ordering, each in its own worktree. |
+| Execute in another session | `executing-plans` | Only when the owner asks for a separate session. |
+| Every code change | `test-driven-development` | §4 red-first; the report names the red evidence. |
+| Any failure or surprise | `systematic-debugging` | Root cause before fix; a fix without a reproduced cause is not accepted. |
+| Before any "done" / commit / PR claim | `verification-before-completion` | Quote the gate output; no claims without evidence. |
+| Before every PR and before a release proposal | `requesting-code-review` | Builtin `reviewer`, filled-in `code-reviewer.md` template (§1). |
+| Reviews on a PR | `receiving-code-review` | Verify each finding technically, then fix or justify (§8). |
+| End of a branch | `finishing-a-development-branch` | **Only option 2 (push + PR) or option 3 (keep the branch).** Option 1 (local merge into `main`) is forbidden — it bypasses §8. Option 4 (discard) only with the owner's typed confirmation. The skill never tags or releases (§1). |
+| Project skills | `writing-skills` | If this repo ships skills under `skills/`. |
+
+- Spikes follow the same loop in short form: brief → subagent → findings in
+  `docs/research/` → load-bearing results as a Proposed ADR.
+- Known skill quirks to work around: `using-git-worktrees` commits a
+  `.gitignore` fix on whatever branch is checked out (not needed here,
+  `.worktrees/` is ignored); `finishing-a-development-branch` computes the
+  base with `git merge-base` (a SHA) — use `origin/main` as the PR base.
