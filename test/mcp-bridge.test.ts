@@ -11,6 +11,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createMcpBridge,
+  isAuthorizedToken,
   MAX_BODY_BYTES,
   type BridgeTool,
   type CreateMcpBridgeOptions,
@@ -112,6 +113,23 @@ const textOf = (result: unknown): string => {
   if (typeof first !== 'object' || first === null || !('text' in first)) return '';
   return String(first.text);
 };
+
+describe('isAuthorizedToken', () => {
+  it('accepts only the exact bearer token, never throws on length mismatch or multibyte input', () => {
+    const token = 'a'.repeat(64);
+    expect(isAuthorizedToken(`Bearer ${token}`, token)).toBe(true);
+    expect(isAuthorizedToken('Bearer wrong-token', token)).toBe(false);
+    expect(isAuthorizedToken(`Bearer ${'a'.repeat(63)}`, token)).toBe(false); // shorter
+    expect(isAuthorizedToken(`Bearer ${'a'.repeat(65)}`, token)).toBe(false); // longer
+    expect(isAuthorizedToken(`Bearer ${token}x`, token)).toBe(false); // prefix+extra
+    expect(isAuthorizedToken(`Bearer ${token.slice(0, 63)}b`, token)).toBe(false); // same length, wrong byte
+    expect(isAuthorizedToken(undefined, token)).toBe(false);
+    expect(isAuthorizedToken('', token)).toBe(false);
+    expect(isAuthorizedToken(`bearer ${token}`, token)).toBe(false); // scheme is case-sensitive
+    // multibyte header: byte lengths differ, must not throw
+    expect(isAuthorizedToken(`Bearer ${'ä'.repeat(32)}`, token)).toBe(false);
+  });
+});
 
 describe('createMcpBridge', () => {
   it('serves on loopback with a random port and a per-session bearer token', async () => {

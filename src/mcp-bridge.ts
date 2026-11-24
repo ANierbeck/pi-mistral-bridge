@@ -36,7 +36,7 @@
  * - `close()` answers all parked calls with an error result and frees the
  *   port; no dangling sockets (AGENTS.md §15).
  */
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { Server as McpSdkServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -172,6 +172,20 @@ function toInputSchema(parameters: unknown): Record<string, unknown> {
 
 function textResult(text: string, isError: boolean): CallToolResult {
   return { content: [{ type: 'text', text }], isError };
+}
+
+/**
+ * Constant-time bearer-token check for the Authorization header: compare the
+ * buffers only after a byte-length check (timingSafeEqual throws on length
+ * mismatch), so neither the length nor the content leaks through timing
+ * (AGENTS.md §15).
+ */
+export function isAuthorizedToken(header: string | undefined, token: string): boolean {
+  if (typeof header !== 'string') return false;
+  const given = Buffer.from(header, 'utf8');
+  const expected = Buffer.from(`Bearer ${token}`, 'utf8');
+  if (given.length !== expected.length) return false;
+  return timingSafeEqual(given, expected);
 }
 
 /**
@@ -322,7 +336,8 @@ export async function createMcpBridge(options: CreateMcpBridgeOptions = {}): Pro
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // Authorization FIRST, before reading the body: an unauthorized request
     // must not make the server consume/buffer its payload (AGENTS.md §15).
-    if (req.headers['authorization'] !== `Bearer ${token}`) {
+    // Constant-time comparison so the token does not leak through timing.
+    if (!isAuthorizedToken(req.headers['authorization'], token)) {
       stats.unauthorizedRequests += 1;
       log('unauthorized', { method: req.method, url: req.url, count: stats.unauthorizedRequests });
       res.writeHead(401, { 'content-type': 'application/json' });
