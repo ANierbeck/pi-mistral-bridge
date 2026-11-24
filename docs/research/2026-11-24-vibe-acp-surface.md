@@ -6,9 +6,10 @@ Feeds the follow-up ADR for ADR-0002 (disable mechanism, permission mode, timeou
 
 ## Verified against
 
-- `vibe-acp` **2.25.8** (`@mistralai/mistral-vibe`, uv tool, Python 3.12), macOS.
-  Source paths below are relative to the tool's `site-packages/`; line numbers are
-  2.25.8. `mistralai_vibe_local_harness` (native "Unified Harness", `_native.abi3.so`)
+- `vibe-acp` **2.25.8** (sections up to "Honesty notes") and **3.1.4** (section
+  "Vibe 3.1.4 re-check", appended below; same uv tool, Python 3.12, macOS). Both
+  `@mistralai/mistral-vibe`. Source paths below are relative to the tool's
+  `site-packages/`; line numbers are 2.25.8 unless the 3.1.4 section says otherwise. `mistralai_vibe_local_harness` (native "Unified Harness", `_native.abi3.so`)
   is installed alongside; its Python wrapper was read, the native part was not.
 - `@agentclientprotocol/sdk` 2.9.1, `@modelcontextprotocol/sdk` 1.32.2, Node 26.
 - Vibe model used for every prompt: **`devstral-small`** (cheapest alias Vibe offered).
@@ -388,3 +389,324 @@ notification `telemetry/send`; client-capability `_meta` keys `browser-auth-dele
    remove builtins there?
 3. Baseline without `VIBE_ENABLED_TOOLS` (default mode, `bash ls`) → was the denial caused
    by the allowlist?
+
+## Vibe 3.1.4 re-check (2026-11-24)
+
+Same worktree, same scripts (`spikes/`, small additions, see its README), after the owner
+upgraded Vibe 2.25.8 → **3.1.4** (`vibe-acp --version`). Everything above this heading is
+2.25.8 history and is unchanged.
+
+**Budget: 0 `session/prompt` calls.** Seven Stage-1 runs (initialize, `session/new`,
+`session/set_mode` / `session/set_config_option` with `configId:"mode"` only,
+`session/close`): `s3-baseline`, `s3-baseline2`, `s3-restricted`
+(`VIBE_ENABLED_TOOLS=["pi_*"]`, `VIBE_ACTIVE_MODEL=devstral-small`, `set_mode auto-approve`),
+`s3-cfgmode`, `s3-policy-env` (`VIBE_DEFAULT_APPROVAL_POLICY=ask`), `s3-noauto`
+(`VIBE_ENABLE_AUTO_APPROVE=false`), `s3-envmcp` (Pi's MCP server only through
+`VIBE_MCP_SERVERS`). The Stage-1 script now throws on `session/prompt` and on any
+`set_config_option` other than `mode`. `~/.vibe/config.toml` mtime was unchanged
+(2026-11-21) before and after all runs; no credentials were read; `pgrep -fl vibe-acp` empty
+after every run. Config parsing was additionally checked in-process with the tool's own
+Python against a throw-away `VIBE_HOME` (removed), no network use by me.
+Source paths below: `site-packages/` of the uv tool; line numbers are 3.1.4. The native
+core (`mistralai_vibe_local_harness/*.so`) was not read.
+
+### Verdict per open decision (3.1.4)
+
+| # | 2.25.8 | 3.1.4 |
+|---|--------|-------|
+| 1 | Refuted as phrased; env allowlist does not hide builtins; denial unexplained; permission requests for MCP unless `auto-approve`. | **Still no per-session switch over ACP; denial now explained by source; approval policy is settable by env and `set_mode`.** Details a, d. Whether builtin *definitions* are hidden from the model is unproven (native core). |
+| 2 | Confirmed HTTP + bearer. | **Confirmed unchanged** (observed): `initialize` → `notifications/initialized` → `tools/list`, UA `MistralAI-VibeCLI/3.1.4`, bearer on every request, 0 unauthorized; also works when the server is configured only through `VIBE_MCP_SERVERS` (`s3-envmcp`). SSE/ACP transports still rejected (`vibe/acp/agent.py:332-339`). |
+| 3 | Confirmed, thin metadata. | **Confirmed, and two new facts:** (i) the list is **dynamic** (remote model catalog), aliases changed between two runs one minute apart; (ii) `usage_update.size` (context window of the *active* model) is now sent right after `session/new`. |
+| 4 | Confirmed parallel. | **Not re-measured** (no prompts). Same harness family as 2.25.8's measured runs (those already ran on the unified harness), so the result is expected to carry over. |
+| 5 | Refuted: only extendable. | **Still only extendable over ACP.** A per-session `system_prompt` exists in the app-server protocol but ACP does not expose it. Details f. |
+
+### Observed on the wire (3.1.4)
+
+- `initialize` response: same shape as 2.25.8 (`agentInfo.version:"3.1.4"`,
+  `loadSession`, `sessionCapabilities {list,fork,close}`, `promptCapabilities
+  {image:true,audio:false,embeddedContext:true}`, `authMethods:[browser-auth]`). No new
+  capability keys, no `_meta`. Took ≈ 3.6 s after spawn (2.25.8 not timed).
+- `session/new` took ≈ 2.9 s. Response:
+
+  ```json
+  {"sessionId":"…",
+   "modes":{"currentModeId":"accept-edits","availableModes":[
+     {"id":"ask","description":"Requires approval for tool executions"},
+     {"id":"accept-edits","description":"Auto-approves file edits only"},
+     {"id":"smart-approve","description":"Classifies each tool call and auto-runs the safe ones, prompting only for risky ones"},
+     {"id":"auto-approve","description":"Auto-approves all tool executions"}]},
+   "configOptions":[
+     {"id":"mode","category":"mode","type":"select","currentValue":"accept-edits","options":[…same 4…]},
+     {"id":"model","category":"model","type":"select","currentValue":"mistral-large-4-0","options":[8 entries]},
+     {"id":"thinking","category":"thinking","type":"select","currentValue":"high","options":[low,medium,high]}],
+   "_meta":{"workspace_trust":{"status":"trusted","details":null}}}
+  ```
+
+  - **Modes = approval policies.** `plan` is gone (3.0.0 release notes, plan mode removed);
+    `smart-approve` is new. There is **no separate approval-policy config option and no
+    `agent` option**: `mode` *is* the approval policy; an `agent` select only appears when
+    more than one primary agent exists (`vibe/acp/utils.py:161-181`; here only `default`).
+  - `model` options on the first run (6): `mistral-large-4-0-3`, `glm-5-3`,
+    `zai-glm-5-3-flash`, `mistral-medium-3.5`, `devstral-small`, `local`. Two runs later (8):
+    `mistral-large-4-0`, `mistral-medium-latest`, `zai-glm-5-3`, `zai-glm-5-3-flash`,
+    `deepseek-v4-1-flash-1017`, `mistral-medium-3.5`, `devstral-small`, `local`. Default is
+    Mistral Large 4 (3.1.3 release notes). `thinking` options depend on the model (`low…high`
+    for the default; `off…max` for `devstral-small`).
+  - `session/set_mode` → `{}`; `session/set_config_option {configId:"mode"}` → the full
+    updated `configOptions` array (SDK 2.9.1 shape).
+- Notifications in the first ≈ 10 s: `usage_update` (`used:0`, `size:400000` for the default
+  model / `200000` for `devstral-small`, `_meta.*Tokens` zero) immediately before the
+  `session/new` response; `available_commands_update` ≈ 0.1 s after it (14 commands now,
+  incl. `compact`, `mcp`, `reload`, `retry`, `vibe:*` skills). No `session_info_update`, no
+  `config_option_update`, no permission request, no client callbacks (fs/terminal/elicitation)
+  and no `_config/changed`.
+- MCP discovery: `initialize` / `notifications/initialized` / `tools/list` ≈ 6.6 s after spawn
+  (right after `session/new` was answered), identical for baseline, restricted, `ask`-policy
+  and env-only runs. The user's own Vibe MCP servers are still loaded alongside (not
+  measured here).
+- Shutdown: `session/close` → `{}` in ≈ 0.2 s; SIGTERM → exit code 0. With stdin closed right
+  after `initialize`, `vibe-acp` exited within ≈ 2 s (exit code 1, nothing written) —
+  consistent with 3.0.3 "exits when its client stops"; not a graceful-path test.
+
+### a. Approval policy vs agent (decision 1)
+
+- **Delta:** 2.25.8 had *modes* (`ask/plan/accept-edits/auto-approve`) that only changed
+  permissions. 3.1.4 splits **agent** (what the session is: `default`, `lean`; custom agent
+  files) from **approval policy** (`ask`, `accept-edits`, `smart-approve`, `auto-approve`,
+  `core/agents/models.py:21-26, 179-210, 271-289`). ACP's `mode` / `session/set_mode` maps
+  1:1 to the policy: `set_session_mode` → `resources.agents.switch_policy(mode_id)` →
+  app-server `session/approvalPolicy/update` (`vibe/acp/agent.py:1074-1083`,
+  `app_server/_runtime_resources.py:351-363`); `set_config_option mode` the same
+  (`agent.py:1092-1093`); `set_config_option agent` switches the agent (`agent.py:1094-1095`).
+  An unknown/hidden mode id makes `set_mode` return `None` (observed as `{}`), not an error.
+- **Per session at creation: no.** The ACP layer builds `SessionOptions(cwd, workspace_roots,
+  disabled_tools, mcp_servers)` only (`agent.py:618-626`) and drops everything else in
+  `session/new` (`del kwargs`, `agent.py:548-571`). The app-server's `AgentConfig` *has*
+  `approval_policy`, `auto_approve`, `enabled_tools`, `system_prompt`, `max_turns`,
+  `max_price` (`app_server/protocol.py:411-441, 461`) but ACP never fills them.
+- **What the bridge can do instead:** per *process* by env, per *session* by `set_mode` after
+  `session/new`. **Verified (Stage 1):** `VIBE_DEFAULT_APPROVAL_POLICY=ask` → the new session
+  reports `currentModeId:"ask"` (`core/config/vibe_schema.py:1143-1151`); `session/set_mode
+  auto-approve` → `{}`. `set_mode` and `set_config_option mode` did **not** touch
+  `config.toml` (mtime unchanged); the switch is pinned to Vibe's own session record
+  (`_unified_harness_backend_adapter.py:10535-10570`) and sends a telemetry event
+  (`:10584`).
+- **Is `auto-approve` refusable?** Yes, but only by Vibe config, not by the ACP client or
+  per session: `enable_auto_approve=false` (env `VIBE_ENABLE_AUTO_APPROVE=false`,
+  `vibe_schema.py:1193-1201`) removes the policy from `availableModes`
+  (`core/agents/manager.py:488-500`) and clamps the bypass
+  (`app_server/_runtime.py:3117-3128`). **Verified:** with that env the list is
+  `ask, accept-edits, smart-approve`, and `set_mode auto-approve` returned `{}` (silently
+  ignored, `agent.py:1078-1080`). ACP has no refusal of its own for auto-approve.
+- `smart-approve` runs a *classifier model call per tool call* (`_runtime.py:2029, 2354-2364`,
+  `classifier_model`, "Set only under smart approve"): extra LLM requests and cost, and a
+  second model sees tool arguments. Not suitable for provider mode.
+- **For ADR-0002:** the two workable shapes are (1) policy `auto-approve` + allowlist
+  (below) or (2) policy `ask` + the bridge answers each `session/request_permission`
+  itself: allow-once when the preceding `tool_call` names a Pi tool (the request still
+  carries only `toolCallId`, `agent.py:917-925`), reject otherwise. (2) keeps AGENTS.md §15
+  literally satisfiable ("reject non-Pi requests") and needs no `auto-approve`; it adds one
+  ACP round-trip per tool call. Option (2) was not exercised (needs a prompt).
+- `request_permission` options now come from `build_permission_options`
+  (`agent.py:917-925`) and can include `allow_always_permanent` and path-scope variants that
+  persist grants (`APPROVE_PERMANENTLY`, `agent.py:934-952`). The bridge must only ever
+  answer `allow_once` / `reject_once`.
+
+### b. MCP tool permissions and trust
+
+- Still **ASK by default** for a client-supplied server's tools: provided/MCP tools resolve
+  to `ToolPermission.ASK` unless in `_ALLOWED_BY_DEFAULT`
+  (`app_server/_unified_permissions.py:85, 613-633`),
+  and the runtime gate for provided tools is `ask` (prompt) / `classify` / `allow` (bypass)
+  (`_runtime.py:3317-3326`).
+- **Per-server trust:** none. `_MCPBase` has `disabled`, `disabled_tools`, `prompt`,
+  `sampling_enabled`, timeouts — no permission/trust field (`core/config/models.py:222-260`);
+  the ACP projection sets only `name`, `url`, `headers` (`agent.py:306-340`,
+  `_runtime.py:3427-3454`).
+- **Per-tool permission without writing a file:** the tool's config key
+  (`tools.<published-name>.permission`, published name = `{server}_{remote-name}`, per
+  `_unified_permissions.py:147-170`) can be set through the env layer. **Verified (config
+  load, isolated `VIBE_HOME`):** `VIBE_TOOLS='{"pi_pi__echo":{"permission":"always"}}'` →
+  `config.tools["pi_pi__echo"] == {"permission":"always"}`. Keys are exact names (no glob),
+  per process, and the Pi tool list is dynamic, so this only works if the bridge spawns
+  `vibe-acp` after it knows the tool names. Whether the unified harness honours it for an
+  ACP-supplied server at call time was **not** observed (paid run).
+- ACP `mcpServers` server entries are **overridden by name** by env-configured ones with the
+  same name (`mcp_servers` is `WithUnionMerge(merge_key="name")`, higher layer wins whole
+  entries, `vibe_schema.py:1068-1072`, `core/config/schema.py:215-223`). Use a different
+  server name if both are used.
+
+### c. MCP tool-call timeout
+
+- **Unchanged: 60 s default** (`tool_timeout_sec`, `core/config/models.py:235-237`;
+  `startup_timeout_sec` 10 s, `:230-234`). Session-scoped ACP servers are built with no
+  timeout field, so they get the defaults (`_runtime.py:3427-3454`).
+- **New finding: configurable, per process, via env.** **Verified (config load + Stage 1):**
+  `VIBE_MCP_SERVERS='[{"transport":"streamable-http","name":"pienv","url":…,
+  "tool_timeout_sec":600,"auth":{"type":"static","headers":{"Authorization":"Bearer …"}}}]'`
+  parses (`config.mcp_servers → [("pienv", 600.0)]`) and `vibe-acp` discovers that server with
+  the bearer header with **no ACP `mcpServers`** at all (`s3-envmcp`: `initialize`,
+  `initialized`, `tools/list`, 0 unauthorized). The value is carried into the runtime as
+  `tool_timeout_s` (`_runtime.py:738, 757`; `_unified_harness_backend_adapter.py:20578`) and
+  used as `read_timeout_seconds` and httpx `read` timeout
+  (`mistralai_vibe_local_harness/vibe/_mcp_transport.py:118-126, 156-158`). **Whether a hold
+  > 60 s with `tool_timeout_sec` raised actually survives is not observed** (paid run). The
+  bearer token then lives in the child's environment (same user; not visible in `ps` args).
+- **ACP:** no way. **Global setting:** none found besides the per-server field (shell tools
+  have their own timeouts, `core/config/shell_timeouts.py`, irrelevant to MCP).
+- **Progress/keepalive: no.** Vibe's `call_tool` passes no `progress_callback`
+  (`_mcp_transport.py:118-126, 296-300`); the Python MCP SDK 2.3.0's request timeout is an
+  anyio deadline on the request (`mcp/shared/_request_clock.py`, `jsonrpc_dispatcher.py:380-440`)
+  that is paused only while the client is waiting on a person for a server-initiated request,
+  not by progress notifications. Do not rely on progress/SSE keepalive to extend a call; the
+  timeout error is `mcp_timeout` ("retryable", `_mcp_transport.py:471`).
+
+### d. `enabled_tools` / `disabled_tools` and a tools-only session
+
+- **Delta (explains the 2.25.8 observation):** `enabled_tools`/`disabled_tools` are applied by
+  `ToolManager.available_tools` to *all* tools including builtins
+  (`core/tools/manager.py:158-186`); the unified runtime builds `available_tools` from it
+  (`_runtime.py:2060-2066`) and sets every builtin that has no available Vibe tool to
+  tool-mode **`deny`** (`_rust_tool_modes`, `_runtime.py:3248-3281`; "A builtin is denied when
+  the catalogue offers no tool it stands for"). That is exactly the observed
+  `tool_denied … approvalSource:"never"` for `bash` in prompt C. So with
+  `VIBE_ENABLED_TOOLS=["pi_*"]` the builtins are **denied by policy, regardless of the
+  approval policy** (also under `auto-approve`: bypass only fills `allow` for builtins that
+  are in `available_tools`, `:3281-3282`; `agent_refused_tools` additionally removes tools an
+  agent sets to `never`, `:2073-2077`, `core/agents/registry.py:194-203`). Vibe-provided
+  tools (todo, scratchpad, cron, …) honour the same globs (`_provided_tools.py:215-260`);
+  connectors/MCP via `_mcp_tool_filter` (`_unified_harness_backend_adapter.py:20548-20554`).
+- **Still unknown:** whether the *definitions* of denied builtins are withheld from the model
+  (2.25.8: the model listed them). That is native-core behaviour — a paid prompt can tell
+  (ask for the tool list; compare `usage_update.used` after the first step).
+- **Tools-only agent/profile: none built in.** Builtin agents: `default`, `lean`
+  (install-required, own model), `explore` (a *subagent*, read-only builtins)
+  (`core/agents/models.py:271-276`). A custom agent can set `enabled_tools`/`disabled_tools`
+  (`_AGENT_KEYS`, `models.py:118-134`) but is a **file** (`~/.vibe/agents/*.toml` or project
+  `.vibe/agents/`), selected by `default_agent` / `VIBE_DEFAULT_AGENT`. `enabled_agents`/
+  `disabled_agents` only filter which agents exist. Relocating `VIBE_HOME` for the child would
+  allow generated files but also hides Vibe's auth — not an option (AGENTS.md §14).
+  **Conclusion:** the env allowlist is the only file-free switch; per process.
+
+### e. `session/set_config_option` for `model`
+
+- **Unchanged by source: persists.** `set_config_option model` →
+  `resources.config.write_model(model_alias=…)` (`agent.py:1096-1100`) → `config/model/write`
+  with `session_only=False` (default; `_runtime_resources.py:131-157`,
+  `protocol.py:1859-1866`) → `_write_default_model_config`
+  (`_unified_harness_backend_adapter.py:10846`): the write goes to the default layer =
+  the **user's `config.toml`** (`core/config/default_orchestrator.py:33-45, 59-65`) and is
+  *also* pinned in the session override layer. `thinking` is the same path
+  (`set_thinking → write_model(reasoning_effort)`). A **non-persisting** variant exists in the
+  app-server (`session_only=True`, `_write_session_model_config`, `:10896`), but ACP
+  never sets it. **Not executed** (budget rule: no `model` writes).
+- **Per-process, non-persisting way: unchanged** — `VIBE_ACTIVE_MODEL=<alias>` works
+  (`s3-restricted`: `model.currentValue:"devstral-small"`, thinking default `off`). It is
+  per `vibe-acp` process, so a per-Pi-turn model switch means one process per model (or a
+  restart on model change). `config.toml` was untouched in all runs.
+- The alias set is **not stable** (see decision 3): use the `description` (API id) plus
+  `name` for matching and re-read the list on every spawn.
+
+### f. System prompt
+
+- **ACP: no new way.** The app-server's `AgentConfig.system_prompt` ("Replaces Vibe's product
+  prompt (or the active agent's own) only: Core's guidance still comes first, and project
+  context and AGENTS.md follow", `protocol.py:437-441`) is not reachable from ACP
+  (`agent.py:618-626`; `session/new._meta` ignored). `VIBE_SYSTEM_PROMPT_BEHAVIOR` is
+  ignored unless GrowthBook set it (`_runtime.py:348-363`); `VIBE_SYSTEM_PROMPT_ID` only picks
+  among the SDK's variants.
+- File-based only: an agent profile with `system_prompt_id` + prompt file (`base` replaces the
+  product prompt, `_runtime.py:303-326, 417`), `session_start` / `pre_agent` hooks
+  (`core/hooks/models.py:20-29`, loaded from hook files via `load_hooks_from_fs`,
+  `core/hooks/config.py:94-116`). Both would mean writing into the user's project or
+  `~/.vibe/`, so not for the bridge.
+- **Client-neutral markdown: yes, in source.** ACP sessions get `surface = "neutral"`
+  (`app_server/_surface_instructions.py:24-37`, `_runtime.py:2176`): "displayed by a client
+  whose rendering is unknown … portable GitHub-flavored markdown" instead of the terminal /
+  desktop block. (The 3.1.1 release notes do not mention this; the source does.) The product
+  prompt itself is unchanged in kind, so Pi's prompt can still only travel as text in the first
+  `session/prompt` (ADR-0003).
+
+### g. Other ACP-layer changes relevant to the bridge
+
+- **`cancelled` with a pending approval (3.0.2):** by source, `session/cancel` →
+  `session.cancel_prompt()` (`agent.py:1000-1007`); the turn task's `CancelledError` yields
+  `PromptResponse(stop_reason="cancelled", usage=…)` unless the connection itself is closed
+  (`agent.py:863-872`), in which case it is re-raised. Not exercised.
+- **Cached tokens (3.0.1):** `PromptResponse.usage.cachedReadTokens` (omitted when 0) and
+  `usage_update._meta.cachedTokens` (`agent.py:1768-1775`; 1777-1800). Not exercised.
+- **Exit when the client stops (3.0.3):** `run_agent(...)` returns on stdin EOF, then
+  `agent.close()`; SIGTERM → graceful close with a 1 s budget
+  (`agent.py:1839-1895`, `_SIGTERM_CLOSE_TIMEOUT_SECONDS`). Observed: EOF → exit within ≈ 2 s;
+  SIGTERM → code 0. The bridge still kills the child on shutdown (AGENTS.md §15).
+- **Admin config change notification (3.1.1):** ext notification `_config/changed`
+  (`CONFIG_CHANGED_EXT_METHOD`, `agent.py:409-415, 1038-1050`) when org config changes; the
+  bridge must ignore unknown ext notifications. Also new: ext `session/retrying`
+  (`RETRYING_EXT_METHOD`, `agent.py:405`) and the stable `config_option_update` session
+  update after slash commands (`agent.py:1814-1821`).
+- **`agentWorktrees`:** an app-server client capability (`_connection_protocol.py:115`,
+  default false). The ACP descriptor sets only `callback_kinds` (`approval`, plus `user_input`
+  when the client advertises `elicitation.form`) and `client_tools` from `fs`/`terminal`
+  (`agent.py:686-710`), so ACP sessions never get the `enter_worktree` tool. Non-interactive
+  clients get only `ask_user_question` disabled now (`NON_INTERACTIVE_DISABLED_TOOLS`,
+  `agent.py:185`; `exit_plan_mode` is gone with plan mode).
+- **Client identification (read-only observation):** `clientInfo.name/title/version` from
+  `initialize` are forwarded unchanged into Vibe's own app-server `ClientInfo(entrypoint="acp")`
+  (`agent.py:686-710`) and into Vibe's telemetry `vibe.new_session` as `client_name` /
+  `client_version` (`core/telemetry/send.py:476-500`, `app_server/_launch_context.py:14-26`) and
+  the GrowthBook experiment evaluation context (`app_server/_missing_layers.py:142`). LLM requests carry the
+  fixed UA `mistral-client-python/Mistral-Vibe/3.1.4` (`utils/http.py:291-304`); MCP requests
+  `MistralAI-VibeCLI/3.1.4`. I found no "third-party client" detection or billing flag in the
+  Python layer — the only name check is `JetBrains.*` for auth methods
+  (`acp/utils.py:124-125`). The `third-party` hits in source concern third-party *model
+  providers*. Native core not read. The bridge keeps identifying itself honestly
+  (`pi-mistral-bridge`, real version; AGENTS.md §14); nothing here was altered.
+- **Startup:** `vibe-acp` now refuses to start without the unified harness runtime
+  (`acp/entrypoint.py:134-143`); `--legacy-harness` and `--experimental-harness` are gone.
+  `experimental_local_runtime_session_api` (default true, `vibe_schema.py:1283-1291`) selects
+  how the app server drives the local session; the legacy runtime path is only reachable
+  with `VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API=false` — not exercised, not recommended.
+
+### Updated open items that still need a real (paid) prompt run
+
+Each is one line; together they fit in ≤ 3 prompts if combined (owner approval per run,
+AGENTS.md §4).
+
+1. **Timeout:** env `VIBE_MCP_SERVERS` server with `tool_timeout_sec=120`, `pi__slow_echo`
+   held 75 s → survives (vs `mcp_timeout` at 60 s with the default). Also run the default
+   60 s case with a 75 s hold on the ACP-supplied server as the control.
+2. **Builtin visibility:** same run, under `VIBE_ENABLED_TOOLS=["pi_*"]` + policy `ask`, ask
+   "list the tools you can call" and call `bash ls` → are builtin definitions hidden, and is
+   `bash` denied without a `request_permission`?
+3. **Policy `ask` + bridge answering:** call a Pi tool in `ask`; the bridge answers
+   `allow_once` to the request; confirm the call runs, the request carries only `toolCallId`
+   preceded by `tool_call mcp_pi.*`, and an `ask`-policy request for `bash` can be rejected
+   without breaking the turn.
+4. **Per-tool `always` via env:** `VIBE_TOOLS` with the published name of one Pi tool under
+   `ask` → no `request_permission` for it; confirms the key format `{server}_{tool}`.
+5. **Parallel batching on 3.1.4:** re-run prompt A/B shape (two tool calls in one step) —
+   confirms decision 4 and the MCP naming (`mcp_pi.pi__echo`) still hold.
+6. **Cancel with a pending approval:** policy `ask`, send `session/cancel` while a permission
+   request is open → `stopReason:"cancelled"`, no hung request, session reusable.
+7. **Usage:** one finished turn → `usage.cachedReadTokens` / `usage_update.cost` shape on 3.1.4
+   (decision for ADR-0003's token accounting).
+8. **`set_config_option model` persistence** is still *only* source-derived; it would write
+   the owner's `config.toml`, so it stays unrun unless the owner wants it proven (back up
+   `config.toml` first, run `thinking`/`model` once, diff).
+
+### Honesty notes (3.1.4 round)
+
+- The 2.25.8 text claims in decisions 1–5 that I re-verified are only those listed above;
+  parallel tool calls (4), MCP naming and per-call MCP sessions on 3.1.4 are source-only
+  (`_mcp_transport.py:118-126` opens a session inside `call_http`) or carried over.
+- The first `s3-baseline` run saw a 6-entry model list and the following runs an 8-entry list:
+  Vibe refreshes its model catalog from a Mistral endpoint using its own credentials
+  (`core/model_catalog/`, TTL 30 days, `_constants.py`); that traffic is Vibe's, not the
+  bridge's. The change is therefore a real behaviour of the tool, not a script difference.
+- `VIBE_TOOLS`, `VIBE_MCP_SERVERS`, `VIBE_DEFAULT_APPROVAL_POLICY` and `VIBE_ENABLED_TOOLS`
+  parsing was verified by loading Vibe's own config orchestrator against a temporary
+  `VIBE_HOME` (it created only `trusted_folders.toml` there; removed). Whether the *runtime*
+  honours each value for ACP-supplied servers is what the paid items above test.
+- The task description attributes "client-neutral markdown" to 3.1.1; the release notes of
+  3.1.1 do not say so, the source does (f). `agentWorktrees` is likewise not in the release
+  notes; it is in `_connection_protocol.py`.
