@@ -20,6 +20,10 @@
  *   and registers nothing in that case, because `registerProvider` REPLACES a
  *   provider's model list and would shadow it (AGENTS.md §6).
  *
+ * When `config.askVibe.enabled` (default true), {@link wireExtension} also
+ * registers the AskVibe tool (src/ask-vibe.ts, ADR-0004) — Pi's extension API
+ * has no agent-mode registration, so AskVibe is a custom `ask_vibe` tool.
+ *
  * Registration timing: Pi's docs (docs/extensions.md, `pi.registerProvider`)
  * state that calls made after the initial extension load take effect
  * immediately, while async factories are awaited before startup — so the
@@ -44,6 +48,7 @@ import {
   type SpawnChildFn,
 } from './acp-client.ts';
 import { MistralProvider } from './provider.ts';
+import { registerAskVibeTool, type AskVibeManager, type RegisterAskVibeDeps } from './ask-vibe.ts';
 
 // ------------------------------------------------------------- registration
 
@@ -219,7 +224,10 @@ export function registerMistralProvider(
 ): MistralProvider {
   const cwd = deps.cwd ?? process.cwd();
   const warn: (message: string) => void =
-    deps.onWarn ?? ((message: string) => process.stderr.write(`pi-mistral-bridge: ${message}\n`));
+    deps.onWarn ??
+    ((message: string): void => {
+      process.stderr.write(`pi-mistral-bridge: ${message}\n`);
+    });
 
   // AGENTS.md §6: the bridge registers only its OWN provider; it must never
   // shadow any provider Pi already registers (registerProvider REPLACES the
@@ -311,8 +319,26 @@ export function registerMistralProvider(
 
 // ------------------------------------------------------------- entry point
 
-/** Extension factory: load config, wire pool + provider (see module doc). */
+/** Test/deps injection for {@link wireExtension} (provider + AskVibe). */
+export interface WireExtensionDeps extends RegisterMistralProviderDeps, RegisterAskVibeDeps {}
+
+/**
+ * Wires the whole bridge into Pi: the provider mode
+ * ({@link registerMistralProvider}) and — when `config.askVibe.enabled` —
+ * the AskVibe tool ({@link registerAskVibeTool}, ADR-0004). Returns both
+ * runtimes so callers/tests can dispose them.
+ */
+export function wireExtension(
+  pi: ExtensionAPI,
+  config: BridgeConfig,
+  deps: WireExtensionDeps = {}
+): { provider: MistralProvider; askVibe: AskVibeManager | null } {
+  const provider = registerMistralProvider(pi, config, deps);
+  const askVibe = config.askVibe.enabled ? registerAskVibeTool(pi, config, deps) : null;
+  return { provider, askVibe };
+}
+
+/** Extension factory: load config, wire provider + AskVibe (see module doc). */
 export default function (pi: ExtensionAPI): void {
-  const config = loadConfig(process.cwd());
-  registerMistralProvider(pi, config);
+  wireExtension(pi, loadConfig(process.cwd()));
 }

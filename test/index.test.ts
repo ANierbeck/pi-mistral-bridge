@@ -25,6 +25,7 @@ import {
   FALLBACK_MAX_TOKENS,
   registerMistralProvider,
   reservedProviderNames,
+  wireExtension,
 } from '../src/index.ts';
 import { VIBE_ENV } from '../src/vibe-protocol.ts';
 import {
@@ -65,22 +66,27 @@ const MODEL: Model<Api> = {
 interface FakePi {
   pi: ExtensionAPI;
   registrations: Array<{ name: string; config: any }>;
+  tools: Array<{ name: string; definition: any }>;
   handlers: Map<string, (event: any, ctx: any) => unknown>;
 }
 
 function makeFakePi(): FakePi {
   const registrations: FakePi['registrations'] = [];
+  const tools: FakePi['tools'] = [];
   const handlers: FakePi['handlers'] = new Map();
   const pi = {
     registerProvider: (name: string, config: unknown) => {
       registrations.push({ name, config });
+    },
+    registerTool: (definition: any) => {
+      tools.push({ name: definition.name, definition });
     },
     on: (event: string, handler: (event: any, ctx: any) => unknown) => {
       handlers.set(event, handler);
       return () => handlers.delete(event);
     },
   } as unknown as ExtensionAPI;
-  return { pi, registrations, handlers };
+  return { pi, registrations, tools, handlers };
 }
 
 async function waitFor(cond: () => boolean, label: string, timeoutMs = 4_000): Promise<void> {
@@ -418,5 +424,52 @@ describe('AGENTS.md §9: no hardcoded model ids in shipped src', () => {
     const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf-8');
     // the model list is read via the pinned config-option id
     expect(source).toContain('modelOptions');
+  });
+});
+
+// ------------------------------------------------------------------ T6 wiring
+
+describe('wireExtension: AskVibe tool registration (ADR-0004, askVibe.enabled)', () => {
+  it('registers the ask_vibe tool next to the provider when askVibe.enabled=true', async () => {
+    const fake = makeFakeSpawn();
+    const { pi, registrations, tools } = makeFakePi();
+    const config: BridgeConfig = {
+      ...CONFIG,
+      askVibe: { enabled: true, defaultMode: 'ask', autoApprove: false },
+    };
+    const { provider, askVibe } = wireExtension(pi, config, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: () => {},
+    });
+    try {
+      expect(tools.map((t) => t.name)).toEqual(['ask_vibe']);
+      expect(tools[0].definition.parameters).toBeDefined();
+      await waitFor(() => registrations.length === 1, 'provider registration');
+      expect(registrations[0].name).toBe('mistral-vibe');
+      expect(askVibe).not.toBeNull();
+    } finally {
+      await provider.dispose();
+      await askVibe?.dispose();
+    }
+  });
+
+  it('registers NO ask_vibe tool when askVibe.enabled=false (provider still registered)', async () => {
+    const fake = makeFakeSpawn();
+    const { pi, registrations, tools } = makeFakePi();
+    const { provider, askVibe } = wireExtension(pi, CONFIG, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: () => {},
+    });
+    try {
+      expect(tools).toEqual([]);
+      expect(askVibe).toBeNull();
+      await waitFor(() => registrations.length === 1, 'provider registration');
+    } finally {
+      await provider.dispose();
+    }
   });
 });

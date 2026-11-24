@@ -84,8 +84,9 @@ function typeName(value: unknown): string {
   return typeof value;
 }
 
-function isAskVibeMode(value: string): value is AskVibeMode {
-  return (ASK_VIBE_MODES as readonly string[]).includes(value);
+/** Type guard for AskVibe mode strings (also used to validate tool params at runtime). */
+export function isAskVibeMode(value: unknown): value is AskVibeMode {
+  return typeof value === 'string' && (ASK_VIBE_MODES as readonly string[]).includes(value);
 }
 
 /** Reads and JSON-parses one config file; `undefined` when it does not exist. */
