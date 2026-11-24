@@ -389,6 +389,25 @@ describe('ask_vibe answer formatting', () => {
 });
 
 describe('ask_vibe error mapping (same as provider mode)', () => {
+  it('session/set_mode failure → error result with the set_mode hint AND the ephemeral session is still closed (no leaked session)', async () => {
+    const h = makeHarness({
+      promptScript: answerScript('ok'),
+      failSetMode: 'fake set_mode failure',
+    });
+    try {
+      const result = await execAsk(h, { question: 'q' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/session\/set_mode/);
+      expect(result.content[0].text).toMatch(/fake set_mode failure/);
+      expect(result.details.error).toBe('protocol');
+      expect(recorded(h, 'session/prompt')).toHaveLength(0); // never prompted
+      // the ephemeral session must NOT leak on a set_mode failure
+      expect(recorded(h, 'session/close').map((r) => r.params)).toEqual([{ sessionId: 'sess-1' }]);
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+
   it('surfaces quota errors with the stable prefix as an error result', async () => {
     const h = makeHarness({
       promptScript: async () => {

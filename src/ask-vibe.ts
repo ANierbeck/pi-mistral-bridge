@@ -320,24 +320,37 @@ export class AskVibeManager {
       const proc = await pool.get(undefined);
       session = await proc.newSession({ cwd: this.options.cwd, mapAllToolCalls: true });
       details.sessionId = session.sessionId;
-      // Validate the requested mode against what the session actually
-      // advertises (modes field, else the mode config option) and never
-      // report a mode that was not actually set: an unknown id makes
-      // session/set_mode a silent no-op on vibe-acp 3.1.4 (plan was removed
-      // in 3.0.0), so fall back to the closest safe available mode.
-      const modes = session.modes ?? modeStateFromConfigOptions(session.configOptions);
-      const resolution = resolveEffectiveVibeModeId(requestedVibeModeId, modes);
-      details.vibeModeId = resolution.modeId;
-      if (resolution.note) {
-        details.modeNote = resolution.note;
-        this.options.onAnomaly?.(`ask_vibe: ${resolution.note}`);
-      }
-      if (resolution.set) await session.setMode(resolution.modeId);
 
       const onAbort = (): void => {
         void session?.cancel().catch(() => {});
       };
       try {
+        // Validate the requested mode against what the session actually
+        // advertises (modes field, else the mode config option) and never
+        // report a mode that was not actually set: an unknown id makes
+        // session/set_mode a silent no-op on vibe-acp 3.1.4 (plan was removed
+        // in 3.0.0), so fall back to the closest safe available mode.
+        // set_mode runs INSIDE this try so its finally still closes the
+        // ephemeral session on failure — a set_mode error must not leak it.
+        const modes = session.modes ?? modeStateFromConfigOptions(session.configOptions);
+        const resolution = resolveEffectiveVibeModeId(requestedVibeModeId, modes);
+        details.vibeModeId = resolution.modeId;
+        if (resolution.note) {
+          details.modeNote = resolution.note;
+          this.options.onAnomaly?.(`ask_vibe: ${resolution.note}`);
+        }
+        if (resolution.set) {
+          try {
+            await session.setMode(resolution.modeId);
+          } catch (error) {
+            const classified = classifyAcpError(error);
+            throw new AcpClientError(
+              classified.kind,
+              `session/set_mode ${JSON.stringify(resolution.modeId)} failed: ${classified.message}`,
+              { cause: error }
+            );
+          }
+        }
         const prompt = session.prompt(params.question);
         // wired AFTER the prompt starts so an already-aborted signal still cancels it
         if (hooks.signal?.aborted) onAbort();
@@ -385,7 +398,7 @@ export class AskVibeManager {
         details.truncated = formatted.truncated;
         return { content: [{ type: 'text', text: formatted.text }], details };
       } catch (error) {
-        // prompt failures: quota prefix / auth hint / aborted / crashed (acp-client)
+        // prompt + set_mode failures: quota prefix / auth hint / aborted / crashed (acp-client)
         const classified = classifyAcpError(error);
         details.error = classified.kind;
         return { content: [{ type: 'text', text: classified.message }], details, isError: true };
@@ -396,7 +409,7 @@ export class AskVibeManager {
         if (session) await session.close().catch(() => {});
       }
     } catch (error) {
-      // setup failures: disposed manager, dead child, failed set_mode, …
+      // setup failures: disposed manager, dead child, failed session/new, …
       const classified = classifyAcpError(error);
       details.error = classified.kind;
       return { content: [{ type: 'text', text: classified.message }], details, isError: true };

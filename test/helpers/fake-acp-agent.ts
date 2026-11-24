@@ -199,7 +199,7 @@ export function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
       if (behavior.failSetMode) {
         const msg =
           typeof behavior.failSetMode === 'string' ? behavior.failSetMode : 'fake set_mode failure';
-        throw acp.RequestError.internalError(msg);
+        throw new acp.RequestError(-32603, msg);
       }
       behavior.onSetMode?.({ sessionId: params.sessionId, modeId: params.modeId });
       return {};
