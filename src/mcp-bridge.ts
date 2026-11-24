@@ -116,13 +116,13 @@ export interface McpBridge {
 }
 
 export interface CreateMcpBridgeOptions {
-  tools?: readonly BridgeTool[];
+  tools?: readonly BridgeTool[] | undefined;
   /** Pre-emptive per-call timeout; default {@link DEFAULT_TOOL_PRE_TIMEOUT_MS} (55 s, ADR-0006). */
-  toolPreTimeoutMs?: number;
+  toolPreTimeoutMs?: number | undefined;
   /** Quiet window for batching; default {@link DEFAULT_BATCH_WINDOW_MS}. */
-  batchWindowMs?: number;
-  serverName?: string;
-  logger?: McpBridgeLogger;
+  batchWindowMs?: number | undefined;
+  serverName?: string | undefined;
+  logger?: McpBridgeLogger | undefined;
 }
 
 // ------------------------------------------------------------------ internals

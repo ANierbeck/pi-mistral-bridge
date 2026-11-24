@@ -31,7 +31,7 @@
   ],
   "scripts": {
     "build": "npm run typecheck && node scripts/build.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "lint": "node scripts/lint.ts",

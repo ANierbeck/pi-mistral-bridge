@@ -109,12 +109,12 @@ interface FakeAgentOptions {
 }
 
 interface FakeBehavior {
-  promptScript?: PromptScript;
-  onCancel?: () => void;
+  promptScript?: PromptScript | undefined;
+  onCancel?: (() => void) | undefined;
   /** When set, the fake agent's initialize handler throws (start must not orphan the child). */
-  failInitialize?: boolean;
+  failInitialize?: boolean | undefined;
   /** When set, the fake agent's initialize handler awaits this first (lets a test dispose mid-start). */
-  onInitialize?: () => Promise<void>;
+  onInitialize?: (() => Promise<void>) | undefined;
 }
 
 function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
@@ -196,7 +196,8 @@ function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
     .onRequest(acp.AGENT_METHODS.session_prompt, async ({ params, client }) => {
       recorded.push({ method: 'session/prompt', params });
       fake.agentCtx = client;
-      if (behavior.promptScript) return behavior.promptScript(params, client, fake);
+      if (behavior.promptScript)
+        return (await behavior.promptScript(params, client, fake)) as acp.PromptResponse;
       return { stopReason: 'end_turn' };
     })
     .onRequest(acp.AGENT_METHODS.session_close, async ({ params }) => {
@@ -386,6 +387,7 @@ describe('VibeProcessPool: spawn, env, handshake, dispose', () => {
 
       const init = h.agents[0].recorded.find((r) => r.method === 'initialize');
       expect(init).toBeDefined();
+      if (!init) throw new Error('initialize was not recorded');
       expect(init.params.clientInfo).toEqual({ name: ACP_CLIENT_NAME, version: pkg.version });
       expect(init.params.clientCapabilities.fs).toEqual({
         readTextFile: false,
@@ -551,6 +553,7 @@ describe('AcpSession.newSession', () => {
       ]);
 
       const newReq = h.agents[0].recorded.find((r) => r.method === 'session/new');
+      if (!newReq) throw new Error('session/new was not recorded');
       expect(newReq.params.cwd).toBe(CWD);
       // the bridge MCP server is offered as an ACP http entry with the bearer header
       expect(newReq.params.mcpServers).toEqual([buildAcpMcpServerEntry(MCP_SERVER)]);
@@ -601,6 +604,7 @@ describe('prompt: streaming, event mapping, result', () => {
       const { events, result } = await collect(session.prompt('say hi'));
 
       const promptReq = h.agents[0].recorded.find((r) => r.method === 'session/prompt');
+      if (!promptReq) throw new Error('session/prompt was not recorded');
       expect(promptReq.params.prompt).toEqual([{ type: 'text', text: 'say hi' }]);
 
       expect(events.map((e) => e.type)).toEqual([
@@ -669,6 +673,7 @@ describe('prompt: streaming, event mapping, result', () => {
       const { result } = await collect(session.prompt(blocks));
       expect(result.stopReason).toBe('end_turn');
       const promptReq = h.agents[0].recorded.find((r) => r.method === 'session/prompt');
+      if (!promptReq) throw new Error('session/prompt was not recorded');
       expect(promptReq.params.prompt).toEqual(blocks);
     } finally {
       await h.pool.dispose();

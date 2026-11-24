@@ -103,8 +103,14 @@ async function rawPost(
   });
 }
 
-const textOf = (result: { content: unknown[] }): string =>
-  (result.content[0] as { type: 'text'; text: string }).text;
+const textOf = (result: unknown): string => {
+  if (typeof result !== 'object' || result === null || !('content' in result)) return '';
+  const content: unknown = result.content;
+  if (!Array.isArray(content) || content.length === 0) return '';
+  const first: unknown = content[0];
+  if (typeof first !== 'object' || first === null || !('text' in first)) return '';
+  return String(first.text);
+};
 
 describe('createMcpBridge', () => {
   it('serves on loopback with a random port and a per-session bearer token', async () => {
