@@ -101,7 +101,7 @@ changing behaviour.
 
 - `pi.registerProvider(name, { models })` **replaces** the provider's model
   list, it does not merge. The bridge registers only **its own** provider
-  (default name `mistral-vibe`, configurable) and always with the full,
+  (default name `mistral-bridge`, configurable) and always with the full,
   current model list.
 - Never register, rename or shadow a provider the bridge does not own
   (especially Pi's builtin `mistral` provider). Never write to Pi's
