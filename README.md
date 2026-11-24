@@ -79,10 +79,12 @@ otherwise. Auto-approve is never used in provider mode.
 
 **Per-turn time budget.** Vibe enforces a hard 60 s per-turn budget on tool
 calls and it is not configurable. The bridge therefore times Pi tools out
-pre-emptively at 55 s (configurable, capped at 60 s) and returns a "killed at
-budget" result; repeated identical calls are de-duplicated by a deterministic
-request id, because Vibe may retry timed-out calls and the server-side handler
-keeps running after a cancel.
+pre-emptively at 55 s (configurable, capped at 60 s) and answers with an
+error result whose text is exactly `Pi tool did not finish within <n> ms
+(Vibe enforces a 60 s per-turn budget)` (`<n>` = the configured
+`toolPreTimeoutMs`); repeated identical calls are de-duplicated by a
+deterministic request id, because Vibe may retry timed-out calls and the
+server-side handler keeps running after a cancel.
 
 **Policy note (honest risk).** Mistral states that use of Mistral harnesses
 via ACP with third-party tools is accepted, but does not explicitly say whether
