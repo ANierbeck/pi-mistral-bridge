@@ -3,9 +3,10 @@
 // The ACP side is the shared in-process fake ACP agent (no real vibe-acp,
 // AGENTS.md §4); `pi` is a minimal fake ExtensionAPI capturing registrations
 // and event handlers.
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
@@ -330,13 +331,91 @@ describe('extension lifecycle wiring (session_start / session_shutdown)', () => 
   });
 });
 
+// AGENTS.md §9 (ADR-0005): shipped src/ must not name a concrete Mistral
+// model id in any position that admits, selects, ranks or excludes a model —
+// the model list is derived from what vibe-acp reports for the session (the
+// `model` config option). Tests may use model literals freely (§9), so only
+// src/ is scanned, never test/ or scripts/.
+//
+// The pattern/allow style mirrors scripts/forbidden-patterns.ts: every
+// pattern carries a WHY comment, and the strings that are allowed on purpose
+// (provider names, the bridge's own config keys) are listed explicitly with
+// their reason — like the case-sensitive owner-handle pattern there, which
+// deliberately lets the capitalized legal name in LICENSE/package.json pass.
+const MODEL_ID_PATTERNS: ReadonlyArray<{ name: string; re: RegExp; why: string }> = [
+  // "mistral/<id>" is a Pi model reference.
+  {
+    name: 'provider-prefixed model ref',
+    re: /mistral\//,
+    why: '"mistral/<model-id>" selects a model',
+  },
+  { name: 'mistral-large id', re: /mistral-large/, why: 'concrete mistral-large-* model id' },
+  { name: 'mistral-medium id', re: /mistral-medium/, why: 'concrete mistral-medium-* model id' },
+  { name: 'mistral-small id', re: /mistral-small/, why: 'concrete mistral-small-* model id' },
+  { name: 'open-mistral id', re: /open-mistral/, why: 'concrete open-mistral-* model id' },
+  { name: 'devstral id', re: /devstral/, why: 'concrete devstral-* model id' },
+  { name: 'ministral id', re: /ministral/, why: 'concrete ministral-* model id' },
+  { name: 'pixtral id', re: /pixtral/, why: 'concrete pixtral-* model id' },
+  { name: 'codestral id', re: /codestral/, why: 'concrete codestral-* model id' },
+  { name: 'glm id', re: /glm-/, why: '"glm-<version>" used as a model ref' },
+];
+
+// Allowed on purpose (AGENTS.md §6): the provider NAME strings and the
+// bridge's own config keys are not model references. The guard test below
+// fails if a future pattern ever matches one of them.
+const ALLOWED_MODEL_TOKENS: readonly string[] = [
+  "'mistral'", // Pi's builtin provider name (PI_BUILTIN_MISTRAL_PROVIDER, src/index.ts)
+  "'mistral-vibe'", // the bridge's own default provider name (DEFAULT_PROVIDER_NAME, src/config.ts)
+  'mistral-bridge', // config file name / log dir / bridge config keys (mistral-bridge.json)
+  'pi-mistral-bridge', // ACP client identity (AGENTS.md §14, ACP_CLIENT_NAME)
+  'mistral.vibe.', // vibe-acp extension _meta key namespace (src/vibe-protocol.ts)
+];
+
 describe('AGENTS.md §9: no hardcoded model ids in shipped src', () => {
-  it('src/index.ts derives every model from the ACP model config option and names no concrete model', () => {
-    const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf-8');
-    for (const option of DEFAULT_MODEL_OPTIONS) {
-      expect(source).not.toContain(option.value);
-      if (typeof option.description === 'string') expect(source).not.toContain(option.description);
+  const SRC_DIR = fileURLToPath(new URL('../src/', import.meta.url));
+  // Recursive over src/: a model literal in ANY shipped file must be caught,
+  // not just in the entry point.
+  const srcFiles = readdirSync(SRC_DIR, { recursive: true })
+    .map(String)
+    .filter((name) => name.endsWith('.ts'))
+    .sort();
+
+  it('scans every src/**/*.ts file, not just src/index.ts', () => {
+    expect(srcFiles).toContain('index.ts');
+    expect(srcFiles.length).toBeGreaterThan(1);
+  });
+
+  it('no src file names a concrete model id; provider names and config keys stay allowed', () => {
+    const hits: string[] = [];
+    for (const file of srcFiles) {
+      const source = readFileSync(join(SRC_DIR, file), 'utf-8');
+      for (const { name, re, why } of MODEL_ID_PATTERNS) {
+        if (re.test(source)) hits.push(`${file}: pattern "${name}" matched (${why})`);
+      }
+      for (const option of DEFAULT_MODEL_OPTIONS) {
+        if (source.includes(option.value)) {
+          hits.push(`${file}: literal model option value "${option.value}"`);
+        }
+        if (typeof option.description === 'string' && source.includes(option.description)) {
+          hits.push(`${file}: literal model option description "${option.description}"`);
+        }
+      }
     }
+    expect(hits).toEqual([]);
+  });
+
+  it('the allowed provider names / config keys match no model-id pattern', () => {
+    const hits: string[] = [];
+    for (const token of ALLOWED_MODEL_TOKENS) {
+      for (const { name, re } of MODEL_ID_PATTERNS) {
+        if (re.test(token)) hits.push(`allowed token "${token}" matches pattern "${name}"`);
+      }
+    }
+    expect(hits).toEqual([]);
+  });
+
+  it('src/index.ts derives every model from the ACP model config option (pinned id read, nothing hardcoded)', () => {
+    const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf-8');
     // the model list is read via the pinned config-option id
     expect(source).toContain('modelOptions');
   });
