@@ -1,0 +1,22 @@
+# Prettier scope: the code — src/, scripts/, test/ and the root configs. The
+# npm scripts (format / format:check) pass the scope explicitly; this file
+# additionally keeps editor integrations and a manual `prettier --check .`
+# on the same scope.
+
+# Build and state output
+dist/
+coverage/
+
+# Local-only trees (never shipped)
+.worktrees/
+spikes/
+
+# Historical documents — ADRs are immutable once accepted (AGENTS.md §12),
+# and plans/research notes are committed history, not prose to reflow
+docs/
+.github/
+.githooks/
+
+# Markdown and machine-generated data are not formatted code
+*.md
+package-lock.json

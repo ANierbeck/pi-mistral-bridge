@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript checks
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting (Prettier)
+        run: npm run format:check
+
+      - name: Run tests with coverage
+        run: npm run test:coverage
+
+      - name: Build bundle
+        run: npm run build
+
+      - name: Assert host-provided packages stay external in the bundle
+        # Pi supplies @earendil-works/* and typebox to extensions
+        # (peerDependencies "*"); a bundled copy would bypass Pi's extension
+        # module mapping. Same assertion as test/bundle.test.ts.
+        run: |
+          node -e "const s = require('node:fs').readFileSync('dist/index.js', 'utf8'); if (s.includes('node_modules/@earendil-works') || s.includes('node_modules/typebox')) { console.error('dist/index.js inlines host-provided packages'); process.exit(1); } console.log('host-provided packages external: ok')"
+
+      - name: Smoke-load the bundle
+        run: node -e "import('./dist/index.js').then((m) => console.log('dist/index.js loads:', Object.keys(m)))"
+
+  # Scans every commit of the push/PR range, not just the tree: this
+  # repository will be public, and a leak removed by a later commit still
+  # stays in the published history (AGENTS.md §8).
+  secret-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install gitleaks (pinned, checksum-verified)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+
+      - name: Scan the commit range
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            RANGE="$PR_BASE..$PR_HEAD"
+          elif [ -n "$PUSH_BEFORE" ] && ! echo "$PUSH_BEFORE" | grep -qE '^0+$' && git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+            RANGE="$PUSH_BEFORE..$PUSH_AFTER"
+          else
+            # First push of a branch, or a before-commit that no longer exists
+            # (force push after a history rewrite): scan the tip commit only.
+            RANGE="$PUSH_AFTER^!"
+          fi
+          echo "Scanning $RANGE"
+          node scripts/secret-scan.ts --range "$RANGE" --require-gitleaks

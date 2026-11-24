@@ -1,0 +1,17 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderTranscript (rebuild prompt body, ADR-0003) > renders user/assistant text, tool calls as [tool pi__name args], images as [image]; system messages are excluded 1`] = `
+"[user]
+hello there
+
+[assistant]
+Hi! Let me check.
+[tool pi__read {"path":"/tmp/x"}]
+
+[tool result pi__read call-1]
+file contents here
+
+[user]
+and an image:
+[image]"
+`;

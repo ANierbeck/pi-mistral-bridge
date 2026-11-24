@@ -226,12 +226,12 @@ changing behaviour.
   *controller*: it plans, writes fully specified task briefs, decides,
   reviews and runs the final verification. It does not write production
   code, tests or spike scripts itself.
-- Model choice: implementers run on a cheaper model than the controller —
-  resolve it with `resolve_model_group` (`standard` for normal
-  implementation, `simple` for mechanical steps) or pick the cheaper
-  sibling of the controller's family when a task needs more strength. The
+- Model choice (owner rule 2026-11-24, supersedes hand-pinning):
+  subagents (`worker`, `reviewer`, `scout`) run on the dynamic model
+  router, model ref `router/dynamic`, which picks a model per request.
+  Pin a concrete model only on the owner's explicit request. The
   controller's model is reserved for planning, gating reviews (§1) and the
-  final judgement. Name the model used in the report.
+  final judgement. Name the model ref used in the report.
 - Mechanical steps — gate runs, log scans, searches, bulk reads, applying a
   fully specified edit — go to the cheapest capable worker
   (`worker_step`, `bulk_read`, or a subagent).
@@ -276,9 +276,17 @@ The bridge must stay on exactly that path:
 - The MCP bridge server listens on **loopback only** (`127.0.0.1`), on a
   random port, and requires a per-session random bearer token. It serves
   only the tools of the Pi session it belongs to.
-- In provider mode, Vibe's own tools are disabled. A Vibe permission request
-  in provider mode is **rejected and logged** — it means tool disabling is
-  broken (ADR-0002).
+- In provider mode, Vibe's own tools are gated off via the process env
+  allowlist (ADR-0006). A Vibe permission request in provider mode is
+  **answered immediately, never left pending** (a pending request makes
+  `session/cancel` hang on Vibe 3.1.4): `allow_once` if the toolCallId maps
+  to one of the bridge's own MCP tools, otherwise `reject_once` **and log**
+  the anomaly. `auto-approve` is never used in provider mode
+  (`VIBE_ENABLE_AUTO_APPROVE=false`).
+- Long Pi tools in provider mode: Vibe enforces a hard 60 s per-turn effect
+  budget, so the bridge pre-emptively times Pi tools out at ~55 s and returns
+  a "killed at budget" result; MCP handlers de-duplicate repeated calls by a
+  deterministic request id (ADR-0006).
 - In AskVibe mode, permission requests go to Pi's UI. Without a UI
   (print mode, subagents) they are **rejected**. Auto-approve exists only as
   an explicit opt-in config flag and is never the default (ADR-0004).

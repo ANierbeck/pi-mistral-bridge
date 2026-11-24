@@ -1,0 +1,14 @@
+#!/bin/sh
+# Pre-push hook — this repository will be public, so a push is a publication
+# (AGENTS.md §8): every commit being pushed is scanned, not just the final
+# tree. Never bypass with --no-verify; fix the offending commit instead.
+# Wired by `npm run prepare` (git config core.hooksPath .githooks).
+# Local dry run without pushing: npm run secret-scan  (--staged-only)
+hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+refs=$(cat)
+if [ -z "$refs" ]; then
+  # Manual run (no ref list on stdin): scan what a push of HEAD would publish.
+  node "$hook_dir/../scripts/secret-scan.ts" --staged-only || exit $?
+else
+  printf '%s\n' "$refs" | node "$hook_dir/../scripts/secret-scan.ts" --pre-push || exit $?
+fi
