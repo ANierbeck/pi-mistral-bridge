@@ -497,6 +497,48 @@ describe('MistralProvider.streamSimple: divergence and abort rebuild (ADR-0003)'
     }
   });
 
+  it('abort mid-turn: the aborted message keeps the partial content streamed before the abort', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent) => {
+        const sessionId = params.sessionId;
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'partial answer' },
+        });
+        // hang until session/cancel resolves the prompt as cancelled
+        return new Promise((resolve) => {
+          h.fake.behavior.onCancel = () => resolve({ stopReason: 'cancelled' });
+        });
+      },
+    });
+    try {
+      const controller = new AbortController();
+      const stream = h.provider.streamSimple(MODEL, contextOf([user('long turn')]), {
+        sessionId: 'pi-1',
+        signal: controller.signal,
+      });
+      const events: AssistantMessageEvent[] = [];
+      const done = (async () => {
+        for await (const event of stream) events.push(event);
+        return stream.result();
+      })();
+      await waitFor(() => h.prompts().length === 1, 'prompt start');
+      await waitFor(
+        () => events.some((e) => e.type === 'text_delta' && e.delta === 'partial answer'),
+        'partial text delivered'
+      );
+      controller.abort();
+      const message = await done;
+      expect(message.stopReason).toBe('aborted');
+      expect(message.errorMessage).toBeTruthy();
+      // the partial content streamed before the abort is preserved on the
+      // aborted message, not replaced by a fresh empty one
+      expect(message.content).toEqual([{ type: 'text', text: 'partial answer' }]);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
   it('abort: session/cancel + stopReason aborted, session dirty, next call rebuilds', async () => {
     const h = makeProvider({
       promptScript: () =>

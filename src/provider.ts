@@ -412,7 +412,7 @@ export class MistralProvider {
     const signal = options?.signal;
     if (signal?.aborted) {
       state.dirty = true;
-      this.endAborted(stream, state, model, 'aborted before the turn started');
+      this.endAborted(stream, state, newAssistantMessage(model), 'aborted before the turn started');
       return;
     }
 
@@ -742,7 +742,7 @@ export class MistralProvider {
       if (error.kind === 'aborted' || error.kind === 'crashed') state.dirty = true;
       if (!turn.ended) {
         if (error.kind === 'aborted') {
-          this.endAborted(turn.stream, state, model, error.message);
+          this.endAborted(turn.stream, state, turn.message, error.message);
         } else {
           turn.message.stopReason = 'error';
           turn.message.errorMessage = error.message; // quota prefix / auth hint (ADR-0002)
@@ -761,7 +761,7 @@ export class MistralProvider {
     const result = outcome as PromptResult;
     if (result.stopReason === 'cancelled') {
       state.dirty = true;
-      if (!turn.ended) this.endAborted(turn.stream, state, model, 'prompt was cancelled');
+      if (!turn.ended) this.endAborted(turn.stream, state, turn.message, 'prompt was cancelled');
       return;
     }
     if (!turn.ended) {
@@ -778,15 +778,19 @@ export class MistralProvider {
     recordSentPrefix(state, [...live.contextMessages, turn.message]);
   }
 
-  /** Terminal `error` event with `aborted` (Pi's abort contract). */
+  /**
+   * Terminal `error` event with `aborted` (Pi's abort contract). Carries the
+   * partial turn message when one exists, so content streamed before the
+   * abort is preserved; a fresh empty message is only used when the turn
+   * never started.
+   */
   private endAborted(
     stream: AssistantMessageEventStream,
     state: SessionState,
-    model: Model<Api>,
+    message: AssistantMessage,
     errorMessage: string
   ): void {
     state.dirty = true;
-    const message = newAssistantMessage(model);
     message.stopReason = 'aborted';
     message.errorMessage = errorMessage;
     stream.push({ type: 'error', reason: 'aborted', error: message });
