@@ -1,0 +1,62 @@
+{
+  "name": "pi-mistral-bridge",
+  "version": "0.1.0",
+  "description": "Pi extension that makes Mistral models usable inside Pi by driving the official Mistral Vibe harness (vibe-acp) over the Agent Client Protocol (ACP).",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "pi-package",
+    "mistral",
+    "vibe",
+    "acp"
+  ],
+  "author": "ANierbeck",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "docs"
+  ],
+  "scripts": {
+    "build": "npm run typecheck && node scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "node scripts/lint.ts",
+    "format": "node scripts/format.ts --write",
+    "format:check": "node scripts/format.ts",
+    "secret-scan": "node scripts/secret-scan.ts --staged-only",
+    "prepare": "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git config core.hooksPath .githooks; fi",
+    "prepublishOnly": "if [ -z \"$(git tag --points-at HEAD 2>/dev/null)\" ]; then echo 'prepublishOnly: no git tag at HEAD - publishing requires the owner's explicit release approval naming the version (AGENTS.md §1)'; exit 1; fi"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^2.9.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@types/node": "^24.19.2",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@typescript-eslint/eslint-plugin": "^8.74.0",
+    "@typescript-eslint/parser": "^8.74.0",
+    "@vitest/coverage-v8": "^5.1.1",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.10.1",
+    "vitest": "^5.1.1"
+  }
+}
