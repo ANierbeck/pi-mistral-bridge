@@ -214,7 +214,7 @@ describe('ask_vibe tool registration + basic ask (ADR-0004)', () => {
     }
   });
 
-  it('maps the mode param via session/set_mode (plan → plan, edit → accept-edits) and uses askVibe.defaultMode from config when omitted', async () => {
+  it('maps the mode param via session/set_mode (edit → accept-edits; plan is unavailable on 3.1.4 → falls back to ask) and uses askVibe.defaultMode from config when omitted', async () => {
     const h = makeHarness({ promptScript: answerScript('ok') });
     const h2 = makeHarness(
       { promptScript: answerScript('ok') },
@@ -224,16 +224,79 @@ describe('ask_vibe tool registration + basic ask (ADR-0004)', () => {
       }
     );
     try {
-      await execAsk(h, { question: 'q1', mode: 'plan' });
+      const r1 = await execAsk(h, { question: 'q1', mode: 'plan' });
       await execAsk(h, { question: 'q2', mode: 'edit' });
       await execAsk(h, { question: 'q3' }); // default 'ask' from CONFIG
-      await execAsk(h2, { question: 'q4' }); // default 'plan' from config
+      const r4 = await execAsk(h2, { question: 'q4' }); // default 'plan' from config
+      // the fake advertises ask + accept-edits only (3.1.4 reality): plan
+      // falls back to ask and is recorded as such — never reported as set
       const modes = recorded(h, 'session/set_mode').map((r) => r.params.modeId);
-      expect(modes).toEqual(['plan', 'accept-edits', 'ask']);
-      expect(recorded(h2, 'session/set_mode').map((r) => r.params.modeId)).toEqual(['plan']);
+      expect(modes).toEqual(['ask', 'accept-edits', 'ask']);
+      expect(r1.details.vibeModeId).toBe('ask');
+      expect(r1.details.modeNote).toMatch(/plan/);
+      expect(recorded(h2, 'session/set_mode').map((r) => r.params.modeId)).toEqual(['ask']);
+      expect(r4.details.vibeModeId).toBe('ask');
     } finally {
       await h.manager.dispose();
       await h2.manager.dispose();
+    }
+  });
+
+  it('mode fallback: requesting plan against a session advertising only ask/accept-edits sets ask and records the effective mode in details (plan is gone since vibe-acp 3.0.0)', async () => {
+    // the fake advertises exactly ask + accept-edits (no plan — 3.1.4 reality)
+    const h = makeHarness({ promptScript: answerScript('ok') });
+    try {
+      const result = await execAsk(h, { question: 'q', mode: 'plan' });
+      const setMode = recorded(h, 'session/set_mode');
+      expect(setMode).toHaveLength(1);
+      expect(setMode[0].params.modeId).toBe('ask'); // NOT plan — never report an unset mode
+      expect(result.isError).toBeUndefined();
+      expect(result.details.mode).toBe('plan'); // requested mode preserved
+      expect(result.details.vibeModeId).toBe('ask'); // the effective mode actually set
+      expect(result.details.modeNote).toMatch(/plan/);
+      expect(result.details.modeNote).toMatch(/ask/);
+      expect(h.anomalies.some((m) => /plan/.test(m) && /ask/.test(m))).toBe(true);
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+
+  it('mode fallback: edit falls back to ask when accept-edits is not advertised', async () => {
+    const h = makeHarness({
+      promptScript: answerScript('ok'),
+      availableModes: [{ id: 'ask', name: 'Ask' }],
+    });
+    try {
+      const result = await execAsk(h, { question: 'q', mode: 'edit' });
+      expect(recorded(h, 'session/set_mode')[0].params.modeId).toBe('ask');
+      expect(result.details.vibeModeId).toBe('ask');
+      expect(result.details.modeNote).toMatch(/accept-edits/);
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+
+  it('mode resolution: a session advertising NO modes keeps the process default (no set_mode call) and notes it', async () => {
+    const h = makeHarness({ promptScript: answerScript('ok'), availableModes: [] });
+    try {
+      const result = await execAsk(h, { question: 'q', mode: 'plan' });
+      expect(recorded(h, 'session/set_mode')).toHaveLength(0);
+      expect(result.details.vibeModeId).toBe('ask'); // the session's currentModeId
+      expect(result.details.modeNote).toMatch(/process default|availableModes/i);
+    } finally {
+      await h.manager.dispose();
+    }
+  });
+
+  it('mode resolution: without a modes field, the mode config option supplies current/available modes (edit → ask fallback)', async () => {
+    const h = makeHarness({ promptScript: answerScript('ok'), omitModes: true });
+    try {
+      const result = await execAsk(h, { question: 'q', mode: 'edit' });
+      // the fake's mode config option advertises only 'ask'
+      expect(recorded(h, 'session/set_mode')[0].params.modeId).toBe('ask');
+      expect(result.details.vibeModeId).toBe('ask');
+    } finally {
+      await h.manager.dispose();
     }
   });
 

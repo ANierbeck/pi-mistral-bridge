@@ -14,7 +14,12 @@
  * site-packages citations).
  */
 import { createRequire } from 'node:module';
-import type { Implementation, McpServer } from '@agentclientprotocol/sdk';
+import type {
+  Implementation,
+  McpServer,
+  SessionConfigOption,
+  SessionModeState,
+} from '@agentclientprotocol/sdk';
 import type { AskVibeMode } from './config.ts';
 
 /** The `vibe-acp` version every entry in this module was verified against. */
@@ -376,12 +381,17 @@ export const MODE_CONFIG_OPTION_ID = 'mode';
  * AskVibe mode → Vibe approval-policy id (ADR-0004). On vibe-acp 3.1.4
  * `session/set_mode` maps 1:1 to the session's approval policy
  * (`vibe/acp/agent.py:1074-1083` → `session/approvalPolicy/update`; research
- * doc §"Approval policy vs agent"): `ask`, `plan`, `accept-edits`. The
- * bridge's `edit` mode is Vibe's `accept-edits` policy — Vibe-internal
- * auto-approval of edit-type effects in that mode is the sanctioned path
- * (ADR-0004); the bridge itself still answers every
- * `session/request_permission` (see src/ask-vibe.ts). The ids are pinned here
- * so a rename in a future Vibe version fails loudly (AGENTS.md §16).
+ * doc §"Approval policy vs agent"). These are the REQUESTED ids, pinned here
+ * so a rename in a future Vibe version fails loudly (AGENTS.md §16) — but
+ * `plan` is NOT a 3.1.4 policy: plan mode was removed in vibe-acp 3.0.0
+ * (research doc "Vibe 3.1.4 re-check" / §a: 3.1.4 offers `ask`,
+ * `accept-edits`, `smart-approve`, `auto-approve`), and an unknown mode id
+ * makes `session/set_mode` return `{}` silently. The bridge's `edit` mode is
+ * Vibe's `accept-edits` policy — Vibe-internal auto-approval of edit-type
+ * effects in that mode is the sanctioned path (ADR-0004); the bridge itself
+ * still answers every `session/request_permission` (see src/ask-vibe.ts).
+ * Before calling `session/set_mode`, the requested id is validated against
+ * the session's advertised modes via {@link resolveEffectiveVibeModeId}.
  */
 export const ASK_VIBE_MODE_IDS: Readonly<Record<AskVibeMode, string>> = Object.freeze({
   ask: 'ask',
@@ -392,6 +402,94 @@ export const ASK_VIBE_MODE_IDS: Readonly<Record<AskVibeMode, string>> = Object.f
 /** The Vibe `session/set_mode` modeId for an AskVibe mode (ADR-0004). */
 export function vibeModeIdFor(mode: AskVibeMode): string {
   return ASK_VIBE_MODE_IDS[mode];
+}
+
+/**
+ * Fallback chain per requested Vibe mode id when the session does not offer
+ * it. Only SAFE policies are ever fallen back to — never `smart-approve` /
+ * `auto-approve` (AGENTS.md §15: the bridge never auto-approves). `plan` was
+ * removed in vibe-acp 3.0.0 (research doc §a), so a `plan` request falls back
+ * to `ask` (the safest); `edit` (`accept-edits`) falls back to `ask` too.
+ */
+const MODE_FALLBACK_CHAIN: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  plan: ['ask'],
+  'accept-edits': ['ask'],
+  ask: [],
+});
+
+/** The outcome of validating a requested mode id against a session's modes. */
+export interface EffectiveVibeMode {
+  /**
+   * The mode id actually in effect after resolution. When {@link set} is
+   * false this is the session's current mode (the process default) — or the
+   * requested id as a last resort when the session advertises nothing at all
+   * (the note then says so).
+   */
+  modeId: string;
+  /** Whether the bridge must call `session/set_mode` with {@link modeId}. */
+  set: boolean;
+  /** Human-readable note when the requested mode was not set verbatim. */
+  note?: string | undefined;
+}
+
+/**
+ * Validates a requested Vibe mode id against the session's advertised modes
+ * (from `session/new`'s `modes`, or the `mode` config option — see
+ * {@link modeStateFromConfigOptions}). On vibe-acp 3.1.4 an unknown mode id
+ * makes `session/set_mode` return `{}` silently (plan is gone since 3.0.0),
+ * so the bridge never reports a mode that was not actually set: an
+ * unavailable request falls back to the closest SAFE available mode
+ * (`plan`→`ask`, `edit`→`accept-edits`→`ask`); if no mode is advertised at
+ * all, the process default is kept and `set` is false.
+ */
+export function resolveEffectiveVibeModeId(
+  requestedModeId: string,
+  modes: SessionModeState | null | undefined
+): EffectiveVibeMode {
+  const available = (modes?.availableModes ?? []).map((m) => m.id);
+  if (available.length === 0) {
+    return {
+      modeId: modes?.currentModeId ?? requestedModeId,
+      set: false,
+      note: `session advertised no availableModes — keeping the process default "${modes?.currentModeId ?? 'unknown'}"`,
+    };
+  }
+  if (available.includes(requestedModeId)) return { modeId: requestedModeId, set: true };
+  const chain = [...(MODE_FALLBACK_CHAIN[requestedModeId] ?? []), 'ask'];
+  const fallback = chain.find((id) => available.includes(id));
+  if (fallback !== undefined) {
+    return {
+      modeId: fallback,
+      set: true,
+      note: `requested mode "${requestedModeId}" is not in the session's availableModes — fell back to "${fallback}"`,
+    };
+  }
+  return {
+    modeId: modes?.currentModeId ?? requestedModeId,
+    set: false,
+    note: `requested mode "${requestedModeId}" is not available and no safe fallback exists — keeping the process default "${modes?.currentModeId ?? 'unknown'}"`,
+  };
+}
+
+/**
+ * Builds the mode state from the `session/new` `mode` config option
+ * ({@link MODE_CONFIG_OPTION_ID}) for sessions whose response carries no
+ * `modes` field: `currentValue` is the current mode, `options[].value` the
+ * available ones. Returns undefined when there is no mode select option.
+ */
+export function modeStateFromConfigOptions(
+  configOptions: readonly SessionConfigOption[] | null | undefined
+): SessionModeState | undefined {
+  const modeOption = (configOptions ?? []).find((o) => o.id === MODE_CONFIG_OPTION_ID);
+  if (modeOption?.type !== 'select') return undefined;
+  return {
+    currentModeId: modeOption.currentValue,
+    availableModes: modeOption.options.flatMap((o) =>
+      'value' in o
+        ? [{ id: o.value, name: o.name }]
+        : o.options.map((g) => ({ id: g.value, name: g.name }))
+    ),
+  };
 }
 
 /**

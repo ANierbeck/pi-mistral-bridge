@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
+import type * as acp from '@agentclientprotocol/sdk';
 import {
   ACP_CLIENT_NAME,
   acpClientInfo,
@@ -30,6 +31,8 @@ import {
   MODEL_CONFIG_OPTION_ID,
   PROMPT_RESPONSE_USAGE,
   UNIFIED_HARNESS_DISCOVERY_TOOL,
+  modeStateFromConfigOptions,
+  resolveEffectiveVibeModeId,
   vibeModeIdFor,
   USAGE_UPDATE_COST,
   USAGE_UPDATE_META,
@@ -268,5 +271,94 @@ describe('AskVibe mode ids (ADR-0004; Vibe 3.1.4 approval policies)', () => {
     expect(vibeModeIdFor('plan')).toBe('plan');
     expect(vibeModeIdFor('edit')).toBe('accept-edits');
     expect(Object.keys(ASK_VIBE_MODE_IDS).sort()).toEqual(['ask', 'edit', 'plan']);
+  });
+
+  it('resolveEffectiveVibeModeId: requested mode advertised → set verbatim, no note', () => {
+    const modes = {
+      currentModeId: 'ask',
+      availableModes: [
+        { id: 'ask', name: 'Ask' },
+        { id: 'accept-edits', name: 'Accept edits' },
+      ],
+    };
+    expect(resolveEffectiveVibeModeId('accept-edits', modes)).toEqual({
+      modeId: 'accept-edits',
+      set: true,
+    });
+  });
+
+  it('resolveEffectiveVibeModeId: plan (removed in vibe-acp 3.0.0) falls back to ask; edit falls back accept-edits→ask; never to smart/auto-approve', () => {
+    const askOnly = { currentModeId: 'ask', availableModes: [{ id: 'ask', name: 'Ask' }] };
+    const planRes = resolveEffectiveVibeModeId('plan', askOnly);
+    expect(planRes.modeId).toBe('ask');
+    expect(planRes.set).toBe(true);
+    expect(planRes.note).toMatch(/plan/);
+    const editRes = resolveEffectiveVibeModeId('accept-edits', askOnly);
+    expect(editRes.modeId).toBe('ask');
+    expect(editRes.set).toBe(true);
+    // unsafe policies are NEVER a fallback (AGENTS.md §15)
+    const unsafeOnly = {
+      currentModeId: 'auto-approve',
+      availableModes: [
+        { id: 'smart-approve', name: 'Smart' },
+        { id: 'auto-approve', name: 'Auto' },
+      ],
+    };
+    const res = resolveEffectiveVibeModeId('plan', unsafeOnly);
+    expect(res.set).toBe(false); // process default kept, not auto-approve
+    expect(res.modeId).toBe('auto-approve'); // the session's currentModeId, reported as-is
+    expect(res.note).toBeDefined();
+  });
+
+  it('resolveEffectiveVibeModeId: no modes advertised → process default, set=false, note', () => {
+    expect(
+      resolveEffectiveVibeModeId('plan', { currentModeId: 'ask', availableModes: [] })
+    ).toEqual({
+      modeId: 'ask',
+      set: false,
+      note: expect.stringMatching(/availableModes/) as unknown as string,
+    });
+    const none = resolveEffectiveVibeModeId('plan', undefined);
+    expect(none.set).toBe(false);
+    expect(none.modeId).toBe('plan'); // requested id as last resort, note explains
+    expect(none.note).toBeDefined();
+  });
+
+  it('modeStateFromConfigOptions: builds the mode state from the session/new mode select option', () => {
+    const configOptions = [
+      {
+        id: 'mode',
+        category: 'mode',
+        type: 'select',
+        name: 'Mode',
+        currentValue: 'ask',
+        options: [
+          { value: 'ask', name: 'Ask' },
+          { value: 'accept-edits', name: 'Accept edits' },
+        ],
+      },
+      {
+        id: 'model',
+        category: 'model',
+        type: 'select',
+        name: 'Model',
+        currentValue: 'x',
+        options: [],
+      },
+    ] as unknown as acp.SessionConfigOption[];
+    expect(modeStateFromConfigOptions(configOptions)).toEqual({
+      currentModeId: 'ask',
+      availableModes: [
+        { id: 'ask', name: 'Ask' },
+        { id: 'accept-edits', name: 'Accept edits' },
+      ],
+    });
+    expect(modeStateFromConfigOptions([])).toBeUndefined();
+    expect(modeStateFromConfigOptions(null)).toBeUndefined();
+    expect(
+      modeStateFromConfigOptions([
+        { id: 'thinking', category: 'x', type: 'boolean', name: 'T', currentValue: true },
+      ] as unknown as acp.SessionConfigOption[])
+    ).toBeUndefined();
   });
 });

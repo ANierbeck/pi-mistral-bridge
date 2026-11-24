@@ -91,6 +91,17 @@ export interface FakeBehavior {
   onCancel?: (() => void) | undefined;
   /** Called when the client sends `session/set_mode` (AskVibe mode switch, ADR-0004). */
   onSetMode?: ((params: { sessionId: string; modeId: string }) => void) | undefined;
+  /** When set, the `session/set_mode` handler throws (message = string value). */
+  failSetMode?: boolean | string | undefined;
+  /**
+   * The `modes.availableModes` the fake advertises on `session/new`
+   * (default: ask + accept-edits — what vibe-acp 3.1.4 offers minus the
+   * unsafe smart-approve/auto-approve; plan is gone since 3.0.0). Pass `[]`
+   * to advertise no modes; `omitModes` drops the whole `modes` field.
+   */
+  availableModes?: acp.SessionMode[] | undefined;
+  /** When true, the `session/new` response carries no `modes` field at all. */
+  omitModes?: boolean | undefined;
   /** When set, the fake agent's initialize handler throws (start must not orphan the child). */
   failInitialize?: boolean | undefined;
   /** When set, the fake agent's initialize handler awaits this first (lets a test dispose mid-start). */
@@ -150,15 +161,8 @@ export function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
     .onRequest(acp.AGENT_METHODS.session_new, async ({ params }) => {
       recorded.push({ method: 'session/new', params });
       const sessionId = nextSessionId();
-      return {
+      const response: acp.NewSessionResponse = {
         sessionId,
-        modes: {
-          currentModeId: 'ask',
-          availableModes: [
-            { id: 'ask', name: 'Ask' },
-            { id: 'accept-edits', name: 'Accept edits' },
-          ],
-        },
         configOptions: [
           {
             id: 'mode',
@@ -179,9 +183,24 @@ export function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
         ],
         _meta: { workspace_trust: { status: 'trusted', details: null } },
       };
+      if (!behavior.omitModes) {
+        response.modes = {
+          currentModeId: 'ask',
+          availableModes: behavior.availableModes ?? [
+            { id: 'ask', name: 'Ask' },
+            { id: 'accept-edits', name: 'Accept edits' },
+          ],
+        };
+      }
+      return response;
     })
     .onRequest(acp.AGENT_METHODS.session_set_mode, async ({ params }) => {
       recorded.push({ method: 'session/set_mode', params });
+      if (behavior.failSetMode) {
+        const msg =
+          typeof behavior.failSetMode === 'string' ? behavior.failSetMode : 'fake set_mode failure';
+        throw acp.RequestError.internalError(msg);
+      }
       behavior.onSetMode?.({ sessionId: params.sessionId, modeId: params.modeId });
       return {};
     })

@@ -29,7 +29,13 @@
  *   through the tool's `onUpdate` as progress.
  * - `session/set_mode` selects the requested mode (`ask`/`plan`/`edit` →
  *   `ask`/`plan`/`accept-edits`, `vibeModeIdFor` in src/vibe-protocol.ts);
- *   default `config.askVibe.defaultMode`.
+ *   default `config.askVibe.defaultMode`. The requested id is first
+ *   validated against the session's advertised `modes` (plan was removed in
+ *   vibe-acp 3.0.0 and an unknown id is a silent no-op on 3.1.4): an
+ *   unavailable mode falls back to the closest safe one (`plan`→`ask`,
+ *   `edit`→`accept-edits`→`ask`), and the EFFECTIVE mode is recorded in
+ *   `details.vibeModeId` + `details.modeNote` — never a mode that was not
+ *   actually set (resolveEffectiveVibeModeId, src/vibe-protocol.ts).
  * - the prompt is the `question` verbatim — deliberately NO Pi transcript
  *   context: the enclosing Pi session may run on another provider, and
  *   shipping its transcript to Mistral via Vibe would leak content the user
@@ -76,8 +82,10 @@ import {
 } from './acp-client.ts';
 import { ASK_VIBE_MODES, isAskVibeMode, type AskVibeMode, type BridgeConfig } from './config.ts';
 import {
+  modeStateFromConfigOptions,
   PERMISSION_OPTION_ALLOW_ONCE,
   PERMISSION_OPTION_REJECT_ONCE,
+  resolveEffectiveVibeModeId,
   vibeModeIdFor,
 } from './vibe-protocol.ts';
 
@@ -96,8 +104,17 @@ export interface AskVibeParams {
 /** `details` of the `ask_vibe` tool result (UI rendering + logs). */
 export interface AskVibeDetails {
   mode: AskVibeMode;
-  /** The Vibe policy id actually set via `session/set_mode`. */
+  /**
+   * The Vibe policy id actually in effect — set via `session/set_mode` when
+   * the session advertises it, otherwise the session's process default.
+   * Never a mode that was not actually set (see {@link modeNote}).
+   */
   vibeModeId: string;
+  /**
+   * Set when the requested mode was not set verbatim (unavailable on this
+   * Vibe version → safe fallback, or no modes advertised → process default).
+   */
+  modeNote?: string | undefined;
   sessionId?: string | undefined;
   stopReason?: string | undefined;
   filesTouched: string[];
@@ -107,12 +124,24 @@ export interface AskVibeDetails {
   error?: string | undefined;
 }
 
+/** Dialog options passed through to `ctx.ui.select` (Pi ExtensionUIDialogOptions). */
+export interface AskVibeSelectOptions {
+  signal?: AbortSignal | undefined;
+  timeout?: number | undefined;
+}
+
 /** Per-call hooks the tool `execute` hands to the manager. */
 export interface AskVibeRunHooks {
   signal?: AbortSignal | undefined;
   onUpdate?: ((partial: AgentToolResult<AskVibeDetails>) => void) | undefined;
   hasUI: boolean;
-  select?: ((title: string, options: string[]) => Promise<string | undefined>) | undefined;
+  select?:
+    | ((
+        title: string,
+        options: string[],
+        opts?: AskVibeSelectOptions
+      ) => Promise<string | undefined>)
+    | undefined;
 }
 
 export interface AskVibeManagerOptions {
@@ -201,7 +230,11 @@ export class AskVibeManager {
   private pool: VibeProcessPool | null = null;
   private disposed = false;
   /** UI state of the CURRENT ask call (calls are serialized; see ask()). */
-  private uiState: { hasUI: boolean; select?: AskVibeRunHooks['select'] } = { hasUI: false };
+  private uiState: {
+    hasUI: boolean;
+    select?: AskVibeRunHooks['select'];
+    signal?: AbortSignal | undefined;
+  } = { hasUI: false };
   /** Serializes ask() calls: the permission bridge reads uiState per call. */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -268,15 +301,18 @@ export class AskVibeManager {
   ): Promise<AgentToolResult<AskVibeDetails>> {
     const { config } = this.options;
     const mode = params.mode ?? config.askVibe.defaultMode;
-    const vibeModeId = vibeModeIdFor(mode);
+    // requested Vibe policy id; replaced by the EFFECTIVE id once the session
+    // reports its modes (an unknown id makes session/set_mode a silent no-op
+    // on vibe-acp 3.1.4 — plan was removed in 3.0.0)
+    const requestedVibeModeId = vibeModeIdFor(mode);
     const details: AskVibeDetails = {
       mode,
-      vibeModeId,
+      vibeModeId: requestedVibeModeId,
       filesTouched: [],
       answerLength: 0,
       truncated: false,
     };
-    this.uiState = { hasUI: hooks.hasUI, select: hooks.select };
+    this.uiState = { hasUI: hooks.hasUI, select: hooks.select, signal: hooks.signal };
     let session: AcpSession | null = null;
     try {
       const pool = this.ensurePool();
@@ -284,7 +320,19 @@ export class AskVibeManager {
       const proc = await pool.get(undefined);
       session = await proc.newSession({ cwd: this.options.cwd, mapAllToolCalls: true });
       details.sessionId = session.sessionId;
-      await session.setMode(vibeModeId);
+      // Validate the requested mode against what the session actually
+      // advertises (modes field, else the mode config option) and never
+      // report a mode that was not actually set: an unknown id makes
+      // session/set_mode a silent no-op on vibe-acp 3.1.4 (plan was removed
+      // in 3.0.0), so fall back to the closest safe available mode.
+      const modes = session.modes ?? modeStateFromConfigOptions(session.configOptions);
+      const resolution = resolveEffectiveVibeModeId(requestedVibeModeId, modes);
+      details.vibeModeId = resolution.modeId;
+      if (resolution.note) {
+        details.modeNote = resolution.note;
+        this.options.onAnomaly?.(`ask_vibe: ${resolution.note}`);
+      }
+      if (resolution.set) await session.setMode(resolution.modeId);
 
       const onAbort = (): void => {
         void session?.cancel().catch(() => {});
