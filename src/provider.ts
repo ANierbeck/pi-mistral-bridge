@@ -113,8 +113,6 @@ interface TurnStream {
   openThinking: number | null;
   /** True once the terminal event was pushed (toolUse park or done/error). */
   ended: boolean;
-  /** Events produced while no stream was attached (parked turn). */
-  queued: AssistantMessageEvent[];
 }
 
 /** The live ACP counterpart of one Pi session key. */
@@ -127,6 +125,13 @@ interface LiveTurn {
   current: TurnStream;
   /** The context messages of the current call (for recordSentPrefix). */
   contextMessages: readonly Message[];
+  /**
+   * Raw ACP events that arrived while `current` was already ended (parked):
+   * they belong to the still-running prompt and are replayed into the next
+   * attached stream by the continue branch — the delivered message of an
+   * ended turn is never mutated.
+   */
+  pendingEvents: AcpSessionEvent[];
 }
 
 function zeroUsage(): Usage {
@@ -425,7 +430,10 @@ export class MistralProvider {
       live.current = turnStream;
       live.contextMessages = context.messages;
       stream.push({ type: 'start', partial: turnStream.message });
-      for (const event of turnStream.queued.splice(0)) stream.push(event);
+      // replay the events that arrived while the old turn was already parked:
+      // they belong to this still-running prompt and must land in the new
+      // stream (the old turn's delivered message is never touched again)
+      for (const event of live.pendingEvents.splice(0)) this.handleAcpEvent(live, event);
       this.attachAbort(live, state, signal);
       const results = decision.results
         .map((r) => toBridgeResult(batch, r))
@@ -530,6 +538,7 @@ export class MistralProvider {
       prompt,
       current: turnStream,
       contextMessages,
+      pendingEvents: [],
     };
     this.live.set(key, live);
     stream.push({ type: 'start', partial: turnStream.message });
@@ -544,7 +553,6 @@ export class MistralProvider {
       openText: null,
       openThinking: null,
       ended: false,
-      queued: [],
     };
   }
 
@@ -583,6 +591,13 @@ export class MistralProvider {
 
   private handleAcpEvent(live: LiveTurn, event: AcpSessionEvent): void {
     const turn = live.current;
+    if (turn.ended) {
+      // The terminal event (toolUse park / done / error) was already pushed:
+      // the delivered message must never be mutated afterwards. Park the raw
+      // event; the continue branch replays it into the next attached stream.
+      live.pendingEvents.push(event);
+      return;
+    }
     switch (event.type) {
       case 'text_delta': {
         if (turn.openThinking !== null) this.closeThinking(live);
@@ -664,12 +679,7 @@ export class MistralProvider {
   }
 
   private emit(live: LiveTurn, event: AssistantMessageEvent): void {
-    const turn = live.current;
-    if (turn.ended) {
-      turn.queued.push(event);
-      return;
-    }
-    turn.stream.push(event);
+    live.current.stream.push(event);
   }
 
   // ------------------------------------------------------------ batch (park)
@@ -751,11 +761,13 @@ export class MistralProvider {
       if (!turn.ended) this.endAborted(turn.stream, state, model, 'prompt was cancelled');
       return;
     }
-    turn.message.usage = result.usage;
-    const mapped = mapStopReason(result.stopReason);
-    turn.message.stopReason = mapped.reason;
-    if (mapped.rawStopReason !== undefined) turn.message.rawStopReason = mapped.rawStopReason;
     if (!turn.ended) {
+      // a parked turn's delivered message is frozen: usage/stopReason are only
+      // written while the turn is still open
+      turn.message.usage = result.usage;
+      const mapped = mapStopReason(result.stopReason);
+      turn.message.stopReason = mapped.reason;
+      if (mapped.rawStopReason !== undefined) turn.message.rawStopReason = mapped.rawStopReason;
       turn.stream.push({ type: 'done', reason: mapped.reason, message: turn.message });
       turn.stream.end();
       turn.ended = true;

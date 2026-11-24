@@ -846,6 +846,81 @@ describe('MistralProvider: resource creation races (one bridge/pool, dispose dur
   });
 });
 
+describe('MistralProvider.streamSimple: late events while parked (ADR-0002)', () => {
+  it('events arriving while the turn is parked never mutate the delivered message and are replayed into the continuation stream', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent) => {
+        const sessionId = params.sessionId;
+        await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'hi' });
+        const client = await h.mcpClient();
+        const pending = client.callTool({ name: 'pi__echo', arguments: { text: 'hi' } });
+        const result = (await pending) as { content: Array<{ text?: string }> };
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `after tool (${result.content[0]?.text})` },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('run tool')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('toolUse');
+      const call = first.message.content.find((b) => b.type === 'toolCall');
+      if (call?.type !== 'toolCall') throw new Error('expected a toolCall');
+      const deliveredContent = JSON.stringify(first.message.content);
+      const deliveredUsage = { ...first.message.usage };
+
+      // late events while the prompt is parked (no stream attached): a usage
+      // update and a text chunk from the still-running ACP prompt
+      const agent = h.fake.agents[0].agentCtx;
+      if (!agent) throw new Error('fake agent has no client context yet');
+      await sendUpdate(agent, 'sess-1', {
+        sessionUpdate: 'usage_update',
+        used: 999,
+        size: 1000,
+        cost: { amount: 0, currency: 'USD' },
+        _meta: {
+          promptTokens: 900,
+          completionTokens: 99,
+          cachedTokens: 0,
+          totalTokens: 999,
+          steps: 1,
+        },
+      });
+      await sendUpdate(agent, 'sess-1', {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'late ' },
+      });
+      await sleep(150); // let the parked consume loop process them
+
+      // the delivered assistant message must be untouched by the late events
+      expect(JSON.stringify(first.message.content)).toBe(deliveredContent);
+      expect(first.message.usage).toEqual(deliveredUsage);
+
+      // continue: deliver the toolResult; the parked prompt finishes
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf([user('run tool'), first.message, toolResult(call.id, 'echo', 'tool output')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      // the late events were replayed into the continuation stream, not lost
+      expect(second.message.content).toEqual([
+        { type: 'text', text: 'late after tool (tool output)' },
+      ]);
+      // and the delivered message is still untouched
+      expect(JSON.stringify(first.message.content)).toBe(deliveredContent);
+      expect(first.message.usage).toEqual(deliveredUsage);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+});
+
 describe('MistralProvider.streamSimple: steering abandons a parked prompt (ADR-0003)', () => {
   it('steering while parked: the old prompt is cancelled, parked calls released with an error, and the new user message rebuilds on a fresh session', async () => {
     // what the parked MCP call resolved to once the provider released it
