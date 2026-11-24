@@ -48,6 +48,7 @@ import {
 import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
 import { DEFAULT_TOOL_PRE_TIMEOUT_MS } from './config.ts';
 import { PI_TOOL_PREFIX, acpClientInfo } from './vibe-protocol.ts';
+import { canonicalJson } from './transcript.ts';
 
 /** Default quiet window that groups parallel MCP calls into one batch (ADR-0006). */
 export const DEFAULT_BATCH_WINDOW_MS = 100;
@@ -142,18 +143,6 @@ const BEARER_RE = /Bearer\s+[A-Za-z0-9._~+/=-]+/g;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** Canonical JSON (sorted keys) so identical args hash identically (ADR-0006). */
-function canonicalJson(value: unknown): string {
-  if (value === undefined) return 'null';
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  const entries = Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`);
-  return `{${entries.join(',')}}`;
 }
 
 /** Deterministic de-dup id: per-turn scope + tool name + canonical args (ADR-0006). */
