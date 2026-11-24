@@ -481,6 +481,14 @@ export class MistralProvider {
     const existing = this.live.get(key);
     if (existing) {
       this.live.delete(key);
+      // abandon the parked prompt: releaseParked answers all parked calls with
+      // an error (they must not land in the new stream), then cancel() asks
+      // Vibe to stop the prompt, then close() cleans up the ACP session
+      // (AGENTS.md §15). This prevents a late tool call from the abandoned
+      // turn being attributed to the new stream.
+      const bridge = this.bridge as McpBridge;
+      bridge.releaseParked('turn abandoned: steering or model switch (ADR-0003)');
+      await existing.session.cancel().catch(() => {});
       await existing.session.close().catch(() => {});
     }
     state.acpSessionId = null;

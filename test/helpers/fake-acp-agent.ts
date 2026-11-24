@@ -65,12 +65,25 @@ export interface FakeAgent {
   recorded: Array<{ method: string; params: any }>;
   permissionRequests: Array<{ params: any; response: any }>;
   agentCtx: acp.AgentContext | null;
+  /**
+   * Number of `session/prompt` requests seen so far across the whole harness
+   * (1 = very first prompt). Lets a promptScript run a tool-parking body only
+   * on the first prompt, so a rebuild/steering/model-switch second prompt does
+   * not park again.
+   */
+  promptCount: number;
   close(): void;
 }
 
 export interface FakeAgentOptions {
   child: FakeVibeChild;
   behavior: FakeBehavior;
+  /**
+   * Shared prompt counter across all agents of one harness (one per spawn):
+   * a rebuild on a NEW model spawns a new agent whose own count would restart
+   * at 1, so parking gates must use this harness-wide count.
+   */
+  promptCounter?: { count: number } | undefined;
 }
 
 export interface FakeBehavior {
@@ -103,6 +116,7 @@ export function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
     recorded,
     permissionRequests,
     agentCtx: null,
+    promptCount: 0,
     close: () => fake.conn.close(),
   };
 
@@ -163,6 +177,7 @@ export function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
     .onRequest(acp.AGENT_METHODS.session_prompt, async ({ params, client }) => {
       recorded.push({ method: 'session/prompt', params });
       fake.agentCtx = client;
+      fake.promptCount = opts.promptCounter ? ++opts.promptCounter.count : fake.promptCount + 1;
       if (behavior.promptScript)
         return (await behavior.promptScript(params, client, fake)) as acp.PromptResponse;
       return { stopReason: 'end_turn' };
@@ -220,20 +235,24 @@ export interface FakeSpawnHarness {
   agents: FakeAgent[];
   spawns: Array<{ command: string; args: string[]; env: Record<string, string> }>;
   behavior: FakeBehavior;
+  /** Harness-wide `session/prompt` count (across all spawned agents). */
+  promptCount: () => number;
   spawnChild: SpawnChildFn;
 }
 
 export function makeFakeSpawn(behavior: FakeBehavior = {}): FakeSpawnHarness {
+  const promptCounter = { count: 0 };
   const harness: FakeSpawnHarness = {
     children: [],
     agents: [],
     spawns: [],
     behavior,
+    promptCount: () => promptCounter.count,
     spawnChild: (command, args, env) => {
       harness.spawns.push({ command, args, env });
       const child = new FakeVibeChild();
       harness.children.push(child);
-      harness.agents.push(startFakeAgent({ child, behavior }));
+      harness.agents.push(startFakeAgent({ child, behavior, promptCounter }));
       return child;
     },
   };

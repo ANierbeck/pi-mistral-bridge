@@ -400,6 +400,38 @@ describe('createMcpBridge', () => {
     expect(lines.some((l) => l.includes('delivery_ignored'))).toBe(true);
   });
 
+  it('releaseParked answers all parked calls with isError and drops the unbatched queue', async () => {
+    const lines: string[] = [];
+    // long batch window: the calls stay queued (not yet batched) when released
+    const bridge = await makeBridge({ batchWindowMs: 10_000 }, lines);
+    const client = await connect(bridge);
+    const batches = recordBatches(bridge);
+
+    const p1 = client.callTool({ name: 'pi__echo', arguments: { text: 'a' } });
+    const p2 = client.callTool({ name: 'pi__read', arguments: { path: '/x' } });
+    await waitFor(
+      () => lines.filter((l) => l.includes('"ev":"parked"')).length === 2,
+      'both calls parked'
+    );
+    await sleep(50); // still inside the window: queued, no batch yet
+    expect(batches).toHaveLength(0);
+
+    bridge.releaseParked('turn abandoned (steering/rebuild)');
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1.isError).toBe(true);
+    expect(textOf(r1)).toBe('turn abandoned (steering/rebuild)');
+    expect(r2.isError).toBe(true);
+    expect(textOf(r2)).toBe('turn abandoned (steering/rebuild)');
+    await sleep(50);
+    expect(batches).toHaveLength(0); // released calls are not batched afterwards
+    expect(lines.filter((l) => l.includes('released_parked')).length).toBe(2);
+
+    // a late delivery for a released call is ignored + logged
+    bridge.deliverResults([{ callId: 'unknown', content: [{ type: 'text', text: 'late' }] }]);
+    expect(lines.some((l) => l.includes('delivery_ignored'))).toBe(true);
+  });
+
   it('close() answers parked calls with an error result and frees the port', async () => {
     const bridge = await makeBridge();
     const client = await connect(bridge);

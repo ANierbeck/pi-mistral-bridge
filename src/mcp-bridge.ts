@@ -114,6 +114,13 @@ export interface McpBridge {
   newTurn(): void;
   /** Answers all parked calls with an error result, closes the server, frees the port. */
   close(): Promise<void>;
+  /**
+   * Abandons all parked calls: answers every pending call with an isError result
+   * using the provided `reason`, then clears the pending queue. Used when a
+   * Pi turn is abandoned (steering / rebuild) so the old prompt's parked calls
+   * never land in the new stream (AGENTS.md §15, ADR-0003).
+   */
+  releaseParked(reason: string): void;
 }
 
 export interface CreateMcpBridgeOptions {
@@ -399,6 +406,19 @@ export async function createMcpBridge(options: CreateMcpBridgeOptions = {}): Pro
       turn += 1;
       resolvedCache.clear();
       log('new_turn', { turn });
+    },
+    releaseParked(reason: string): void {
+      for (const call of pending.values()) {
+        log('released_parked', { callId: call.callId, piToolName: call.piToolName, reason });
+        finishCall(call, textResult(reason, true));
+      }
+      pending.clear();
+      batchQueue = [];
+      if (batchTimer) {
+        clearTimeout(batchTimer);
+        batchTimer = null;
+      }
+      log('released_all_parked', { reason });
     },
     async close(): Promise<void> {
       if (closed) return;

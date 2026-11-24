@@ -172,9 +172,13 @@ function makeProvider(behavior: FakeBehavior = {}): ProviderHarness {
       }
       return client;
     },
-    prompts: () => fake.agents[0]?.recorded.filter((r) => r.method === 'session/prompt') ?? [],
+    prompts: () =>
+      fake.agents.flatMap((a) => a.recorded).filter((r) => r.method === 'session/prompt'),
     sessionNews: () =>
-      fake.agents[0]?.recorded.filter((r) => r.method === 'session/new').length ?? 0,
+      fake.agents.reduce(
+        (n, a) => n + a.recorded.filter((r) => r.method === 'session/new').length,
+        0
+      ),
   };
 }
 
@@ -838,6 +842,135 @@ describe('MistralProvider: resource creation races (one bridge/pool, dispose dur
       expect(fake.spawns).toHaveLength(0);
     } finally {
       await provider.dispose();
+    }
+  });
+});
+
+describe('MistralProvider.streamSimple: steering abandons a parked prompt (ADR-0003)', () => {
+  it('steering while parked: the old prompt is cancelled, parked calls released with an error, and the new user message rebuilds on a fresh session', async () => {
+    // what the parked MCP call resolved to once the provider released it
+    let released: { isError: boolean | undefined; text: string | undefined } | null = null;
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        // park only on the FIRST prompt (harness-wide count); the steering
+        // rebuild prompt must not park again on the fresh session
+        if (fake.promptCount !== 1) return { stopReason: 'end_turn' };
+        const sessionId = params.sessionId;
+        await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'hi' });
+        const client = await h.mcpClient();
+        // the call parks; the provider answers it when the turn is abandoned
+        const result = (await client.callTool({
+          name: 'pi__echo',
+          arguments: { text: 'hi' },
+        })) as { content: Array<{ text?: string }>; isError?: boolean };
+        released = { isError: result.isError, text: result.content[0]?.text };
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `tool returned: ${result.content[0].text}` },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      // first turn parks a tool batch
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('run tool')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('toolUse');
+      const call = first.message.content.find((b) => b.type === 'toolCall');
+      if (call?.type !== 'toolCall') throw new Error('expected a toolCall');
+      expect(h.prompts()).toHaveLength(1);
+
+      // steering: a NEW user message after the parked assistant message (and NO
+      // toolResult for the parked call) -> decideFlow rebuilds (ADR-0003). The
+      // old prompt must be cancelled and the parked call released with an
+      // error so it does not resolve into the new stream.
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf([user('run tool'), first.message, user('forget it, do something else')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      // the abandoned turn's trailing output must NOT leak into the new stream
+      expect(second.message.content).toEqual([]);
+      // the parked call was released with an isError result naming the reason
+      expect(released).toEqual({
+        isError: true,
+        text: 'turn abandoned: steering or model switch (ADR-0003)',
+      });
+      // the old ACP session was cancelled, a new one created on the SAME
+      // pooled process (same model alias -> no new spawn)
+      expect(h.sessionNews()).toBe(2);
+      expect(h.prompts()).toHaveLength(2); // old parked prompt + fresh prompt
+      expect(h.fake.spawns).toHaveLength(1);
+      // the provider sent session/cancel to the old session
+      const cancels = h.fake.agents[0].recorded.filter((r) => r.method === 'session/cancel');
+      expect(cancels).toHaveLength(1);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('model switch while parked: old prompt is cancelled, parked calls released, new model rebuilds on its own process', async () => {
+    let released: { isError: boolean | undefined; text: string | undefined } | null = null;
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        // park only on the FIRST prompt (harness-wide count, because the model
+        // switch spawns a second agent whose own count would restart at 1)
+        if (fake.promptCount !== 1) return { stopReason: 'end_turn' };
+        const sessionId = params.sessionId;
+        const promptText = params.prompt[0]?.type === 'text' ? params.prompt[0].text : '';
+        if (!promptText.includes('run tool')) return { stopReason: 'end_turn' };
+        await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'hi' });
+        const client = await h.mcpClient();
+        const result = (await client.callTool({
+          name: 'pi__echo',
+          arguments: { text: 'hi' },
+        })) as { content: Array<{ text?: string }>; isError?: boolean };
+        released = { isError: result.isError, text: result.content[0]?.text };
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `tool returned: ${result.content[0].text}` },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('run tool')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('toolUse');
+      const call = first.message.content.find((b) => b.type === 'toolCall');
+      if (call?.type !== 'toolCall') throw new Error('expected a toolCall');
+
+      // switch models while the tool is still parked -> rebuild on MODEL2
+      // (parked assistant message + plain user message, no toolResult)
+      const stream2 = h.provider.streamSimple(
+        MODEL2,
+        contextOf([user('run tool'), first.message, user('use the other model')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      // the old parked call was released (errored); the new model's prompt ran
+      // without tool calls, so nothing lands in the new stream
+      expect(second.message.content).toEqual([]);
+      expect(released).toEqual({
+        isError: true,
+        text: 'turn abandoned: steering or model switch (ADR-0003)',
+      });
+      // a new session on a NEW process for the new model alias (ADR-0007)
+      expect(h.sessionNews()).toBe(2);
+      expect(h.fake.spawns).toHaveLength(2);
+      expect(h.fake.spawns[1].env[VIBE_ENV.ACTIVE_MODEL]).toBe('mistral-medium-3.5');
+      // the old session got session/cancel
+      const cancels = h.fake.agents[0].recorded.filter((r) => r.method === 'session/cancel');
+      expect(cancels).toHaveLength(1);
+    } finally {
+      await h.provider.dispose();
     }
   });
 });
