@@ -46,6 +46,36 @@ is enforced by `spikes/out/prompt-count.json` (checked and incremented *before* 
 failed runs count). Never run Stage 2 without the owner's approval for that run
 (AGENTS.md §4).
 
+## Stage 3 — `acp-paid.ts` (**PAID — owner-approved runs only, vibe-acp 3.1.4**)
+
+```bash
+npx tsx acp-paid.ts --prompt timeout|visibility|cancel \
+  [--model-alias devstral-small] [--slow-ms 75000] [--timeout-ms 300000]
+```
+
+One `session/prompt` per process; the paid stage's budget of **3 prompts** is enforced by
+`spikes/out/prompt-count.json` (refuses a 4th send; failed runs count; when a new task gets a
+fresh budget, archive the old counter file instead of deleting it). Process configuration
+under test (provider-mode candidate, ADR-0002), all env-only:
+
+- `VIBE_ACTIVE_MODEL=<alias>` — cheapest Mistral alias from the `model` config option of
+  `session/new` (re-read on every spawn; the catalog is dynamic). NEVER
+  `session/set_config_option` with `configId: model` — that persists into the user's
+  `~/.vibe/config.toml`.
+- `VIBE_ENABLE_AUTO_APPROVE=false`, `VIBE_DEFAULT_APPROVAL_POLICY=ask` — session mode stays `ask`.
+- `VIBE_ENABLED_TOOLS=["pi_*","pislow_*"]` — allowlist matching the MCP display name
+  `{server}_{tool}` of both the ACP-supplied server "pi" and the env server "pislow".
+- `VIBE_MCP_SERVERS` — one streamable-HTTP server "pislow" → the spike's loopback server
+  (bearer header, `tool_timeout_sec: 120`). The ACP `session/new` additionally supplies the
+  HTTP server "pi" with the default timeout.
+
+The client answers `session/request_permission` itself: `allow_once` only when the referenced
+`toolCallId` belongs to a `tool_call` whose title / `_meta.tool_name` names one of the spike's
+MCP tools, otherwise `reject_once` (never `allow_always*`); every decision is logged.
+`--prompt cancel` instead holds the request unanswered and sends `session/cancel` ~3 s later.
+Each run records `stat` + `sha256` of `~/.vibe/config.toml` before and after (hash only — the
+file is never read into a log or copied) and kills its `vibe-acp` child.
+
 ## Output
 
 `spikes/out/` (git-ignored): `*-acp-raw.jsonl` (every JSON-RPC message, timestamped),
@@ -55,6 +85,8 @@ the prompts that were sent: never commit them.
 
 ## Files
 
-- `lib.ts` — MCP server, vibe-acp spawn, raw JSON-RPC tee, prompt budget, redaction.
+- `lib.ts` — MCP server, vibe-acp spawn, raw JSON-RPC tee, prompt budget, redaction,
+  pluggable `session/request_permission` handler (`onPermissionRequest`).
 - `acp-surface.ts` — Stage 1.
 - `acp-prompts.ts` — Stage 2.
+- `acp-paid.ts` — Stage 3 (paid).

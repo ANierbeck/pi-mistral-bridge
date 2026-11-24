@@ -212,6 +212,21 @@ export interface OpenOptions {
   noAcpMcpServers?: boolean;
   /** Optional hook run right after session/new, before the caller continues. */
   afterNewSession?: (s: SpikeSession) => Promise<void>;
+  /**
+   * Custom handler for `session/request_permission`. Must return the ACP response
+   * (`{ outcome: { outcome: "selected", optionId } }` or `{ outcome: { outcome: "cancelled" } }`),
+   * or a never-resolving promise to leave the request unanswered (cancel test).
+   * Default (no handler): log and reject_once.
+   */
+  onPermissionRequest?: (params: any, ctx: PermissionContext) => Promise<any>;
+}
+
+/** What a custom permission handler can inspect to map toolCallId -> tool name. */
+export interface PermissionContext {
+  updates: Array<{ ms: number; update: acp.SessionUpdate }>;
+  permissionRequests: unknown[];
+  eventLog: JsonlLog;
+  sessionId: string;
 }
 
 export async function openSession(opts: OpenOptions): Promise<SpikeSession> {
@@ -238,6 +253,7 @@ export async function openSession(opts: OpenOptions): Promise<SpikeSession> {
 
   const permissionRequests: unknown[] = [];
   const updates: Array<{ ms: number; update: acp.SessionUpdate }> = [];
+  const permCtx: PermissionContext = { updates, permissionRequests, eventLog, sessionId: "" };
 
   const baseStream = acp.ndJsonStream(
     Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
@@ -269,6 +285,11 @@ export async function openSession(opts: OpenOptions): Promise<SpikeSession> {
     .client({ name: "pi-mistral-bridge-spike" })
     .onRequest(acp.CLIENT_METHODS.session_request_permission, async ({ params }) => {
       permissionRequests.push(params);
+      if (opts.onPermissionRequest) {
+        const decision = await opts.onPermissionRequest(params, permCtx);
+        eventLog.write({ ev: "permission_request", params, handledBy: "custom", decision });
+        return decision;
+      }
       eventLog.write({ ev: "permission_request", params, decision: "reject" });
       const reject = params.options.find((o) => o.kind === "reject_once") ?? params.options.find((o) => o.kind === "reject_always");
       return reject
@@ -340,6 +361,7 @@ export async function openSession(opts: OpenOptions): Promise<SpikeSession> {
           ],
     });
     eventLog.write({ ev: "new_session_response", response: newSessionResponse });
+    permCtx.sessionId = newSessionResponse.sessionId;
 
     session = {
       runId: opts.runId,
