@@ -1,7 +1,7 @@
 {
   "name": "pi-mistral-bridge",
   "version": "0.1.0",
-  "description": "Pi extension that makes Mistral models usable inside Pi by driving the official Mistral Vibe harness (vibe-acp) over the Agent Client Protocol (ACP).",
+  "description": "Pi extension exposing Mistral models via the user's vibe-acp over ACP",
   "keywords": [
     "pi",
     "pi-extension",
