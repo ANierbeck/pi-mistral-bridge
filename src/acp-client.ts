@@ -16,7 +16,7 @@
  * Event mapping (pi-ai semantics; T5 builds the `AssistantMessage` partials):
  * `agent_message_chunk` → text delta, `agent_thought_chunk` → thinking
  * delta, bridge `tool_call`/`tool_call_update` (`_meta.tool_name` starting
- * with the `pi__` MCP prefix) → parked tool call, everything else (builtins,
+ * with the bridge server's `mcp_<server>.pi__` prefix) → parked tool call, everything else (builtins,
  * the `search_tool_functions` discovery pseudo-tool) is ignored for Pi
  * mapping. Usage comes from `usage_update` / the prompt response, cost is
  * forced to 0 (ADR-0003).
@@ -36,7 +36,8 @@ import {
   MODEL_CONFIG_OPTION_ID,
   PERMISSION_OPTION_ALLOW_ONCE,
   PERMISSION_OPTION_REJECT_ONCE,
-  PI_TOOL_PREFIX,
+  buildBridgeToolMetaPrefix,
+  buildMcpDisplayNamePrefix,
   PROMPT_RESPONSE_USAGE,
   TOOL_CALL_META_TOOL_NAME,
   USAGE_UPDATE_META,
@@ -271,9 +272,38 @@ function mapUsageUpdate(update: acp.UsageUpdate): {
 
 // ------------------------------------------------------------- event mapping
 
-/** A tool call is a bridge (Pi) tool iff its `_meta.tool_name` has the `pi__` prefix. */
-export function isBridgeToolName(toolName: unknown): toolName is string {
-  return typeof toolName === 'string' && toolName.startsWith(PI_TOOL_PREFIX);
+/**
+ * A tool call is a bridge (Pi) tool iff its `_meta.tool_name` starts with the
+ * bridge server's own `mcp_<server>.pi__` prefix — the exact form vibe-acp
+ * 3.1.4 puts on MCP tool calls (wire evidence `spikes/out/*-acp-raw.jsonl`,
+ * e.g. `mcp_pi.pi__echo`; docs/research/2026-11-24-vibe-acp-surface.md). A
+ * `pi__`-prefixed tool of any OTHER MCP server (e.g. `mcp_evil.pi__steal`,
+ * which the user's own Vibe config can contribute to every session) is
+ * rejected, as is the bare `pi__<tool>` form.
+ *
+ * Safety assumption behind mapping by tool name at all: this prefix check is
+ * only safe because `VIBE_ENABLED_TOOLS` restricts execution to the bridge
+ * server's tool display names, and policy-denied tools never raise a
+ * `session/request_permission` (docs/research/2026-11-24-vibe-acp-surface.md,
+ * paid run prompt 2: builtin attempts failed with `tool_denied` /
+ * `approvalSource:"never"` without any request to the client). A permission
+ * request for a non-bridge toolCallId can therefore only be an anomaly,
+ * which the bridge answers `reject_once` and logs (ADR-0006).
+ */
+export function isBridgeToolName(toolName: unknown, mcpServerName: string): toolName is string {
+  return (
+    typeof toolName === 'string' && toolName.startsWith(buildBridgeToolMetaPrefix(mcpServerName))
+  );
+}
+
+/**
+ * The MCP request name behind a bridge `_meta.tool_name`
+ * (`mcp_<server>.pi__<tool>` → `pi__<tool>`), i.e. the name the bridge's MCP
+ * server published for the tool.
+ */
+export function bridgeToolRequestName(toolName: string, mcpServerName: string): string {
+  const displayPrefix = buildMcpDisplayNamePrefix(mcpServerName);
+  return toolName.startsWith(displayPrefix) ? toolName.slice(displayPrefix.length) : toolName;
 }
 
 function readToolName(meta: { [key: string]: unknown } | null | undefined): unknown {
@@ -575,12 +605,12 @@ export class AcpSession {
         const toolName = readToolName(update._meta);
         // builtins and the search_tool_functions discovery pseudo-tool are
         // ignored for Pi mapping (they are denied by policy anyway, ADR-0006)
-        if (!isBridgeToolName(toolName)) return null;
+        if (!isBridgeToolName(toolName, this.process.mcpServerName)) return null;
         return {
           type: 'tool_call',
           toolCall: {
             toolCallId: update.toolCallId,
-            name: toolName,
+            name: bridgeToolRequestName(toolName, this.process.mcpServerName),
             title: update.title,
             rawInput: update.rawInput,
             rawOutput: update.rawOutput,
@@ -590,12 +620,12 @@ export class AcpSession {
       }
       case 'tool_call_update': {
         const info = this.toolCalls.get(update.toolCallId);
-        if (!info || !isBridgeToolName(info.toolName)) return null;
+        if (!info || !isBridgeToolName(info.toolName, this.process.mcpServerName)) return null;
         return {
           type: 'tool_call_update',
           toolCall: {
             toolCallId: update.toolCallId,
-            name: info.toolName,
+            name: bridgeToolRequestName(info.toolName, this.process.mcpServerName),
             title: info.title,
             rawInput: update.rawInput !== undefined ? update.rawInput : info.rawInput,
             rawOutput: update.rawOutput !== undefined ? update.rawOutput : undefined,
@@ -659,6 +689,8 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 /** One spawned `vibe-acp` process and its ACP connection. */
 export class VibeAcpProcess {
   readonly modelAlias: string;
+  /** Name of the bridge MCP server this process was spawned with (env + session/new). */
+  readonly mcpServerName: string;
   readonly child: VibeChildProcess;
   readonly abortWatchdogMs: number;
   alive = true;
@@ -679,6 +711,7 @@ export class VibeAcpProcess {
     debugLog: AcpDebugLog | null
   ) {
     this.modelAlias = options.modelAlias;
+    this.mcpServerName = options.mcpServer.name;
     this.child = child;
     this.conn = conn;
     this.ctx = conn.agent;
@@ -846,7 +879,7 @@ export class VibeAcpProcess {
   ): acp.RequestPermissionResponse {
     const session = this.sessions.get(params.sessionId);
     const info = session?.toolCallInfo(params.toolCall.toolCallId);
-    const bridge = info !== undefined && isBridgeToolName(info.toolName);
+    const bridge = info !== undefined && isBridgeToolName(info.toolName, this.mcpServerName);
     const wantedId = bridge ? PERMISSION_OPTION_ALLOW_ONCE : PERMISSION_OPTION_REJECT_ONCE;
     const wantedKind: acp.PermissionOptionKind = bridge ? 'allow_once' : 'reject_once';
     const option =

@@ -15,8 +15,10 @@ import {
   AcpClientError,
   QUOTA_ERROR_PREFIX,
   VibeProcessPool,
+  bridgeToolRequestName,
   classifyAcpError,
   extractModelOptions,
+  isBridgeToolName,
   type AcpPrompt,
   type AcpSessionEvent,
   type PromptResult,
@@ -318,7 +320,7 @@ const defaultPromptScript: PromptScript = async (params, agent) => {
     title: 'mcp_pi.pi__echo',
     status: 'in_progress',
     rawInput: { text: 'hi' },
-    _meta: { [TOOL_CALL_META_TOOL_NAME]: 'pi__echo', effect_kind: 'tool' },
+    _meta: { [TOOL_CALL_META_TOOL_NAME]: 'mcp_pi.pi__echo', effect_kind: 'tool' },
   });
   await sendUpdate(agent, sessionId, {
     sessionUpdate: 'tool_call_update',
@@ -696,7 +698,7 @@ describe('prompt: streaming, event mapping, result', () => {
         toolCallId: 'effect-1',
         title: 'mcp_pi.pi__echo',
         status: 'in_progress',
-        _meta: { [TOOL_CALL_META_TOOL_NAME]: 'pi__echo' },
+        _meta: { [TOOL_CALL_META_TOOL_NAME]: 'mcp_pi.pi__echo' },
       });
       return { stopReason: 'end_turn' };
     };
@@ -737,7 +739,7 @@ describe('prompt: streaming, event mapping, result', () => {
           title: `mcp_pi.pi__echo`,
           status: 'in_progress',
           rawInput: { text },
-          _meta: { [TOOL_CALL_META_TOOL_NAME]: 'pi__echo' },
+          _meta: { [TOOL_CALL_META_TOOL_NAME]: 'mcp_pi.pi__echo' },
         });
       }
       await sendUpdate(agent, sessionId, {
@@ -783,6 +785,31 @@ describe('prompt: streaming, event mapping, result', () => {
   });
 });
 
+describe('isBridgeToolName (server-scoped, ADR-0006)', () => {
+  it('accepts only the bridge server’s own mcp_<server>.pi__ display names (3.1.4 wire form)', () => {
+    expect(isBridgeToolName('mcp_pi.pi__echo', 'pi')).toBe(true);
+    expect(isBridgeToolName('mcp_pi.pi__slow_echo', 'pi')).toBe(true);
+    // a pi__-prefixed tool of a DIFFERENT MCP server is rejected
+    expect(isBridgeToolName('mcp_evil.pi__steal', 'pi')).toBe(false);
+    // the bare pi__ form is not the observed _meta.tool_name form → rejected
+    expect(isBridgeToolName('pi__echo', 'pi')).toBe(false);
+    // builtins and the discovery pseudo-tool are not bridge tools
+    expect(isBridgeToolName('file_system.bash', 'pi')).toBe(false);
+    expect(isBridgeToolName(UNIFIED_HARNESS_DISCOVERY_TOOL, 'pi')).toBe(false);
+    expect(isBridgeToolName(undefined, 'pi')).toBe(false);
+    expect(isBridgeToolName(42, 'pi')).toBe(false);
+  });
+
+  it('normalizes the MCP server name like Vibe does ([^A-Za-z0-9_-] → _)', () => {
+    expect(isBridgeToolName('mcp_my_server.pi__x', 'my server')).toBe(true);
+    expect(isBridgeToolName('mcp_my_server.pi__x', 'other')).toBe(false);
+  });
+
+  it('strips the mcp_<server>. prefix to the MCP request name for the parked call', () => {
+    expect(bridgeToolRequestName('mcp_pi.pi__echo', 'pi')).toBe('pi__echo');
+  });
+});
+
 describe('request_permission bridge (ADR-0006)', () => {
   it('answers allow_once for a bridge MCP tool, reject_once + anomaly for a builtin, always answers', async () => {
     const script: PromptScript = async (params, agent, fake) => {
@@ -792,7 +819,7 @@ describe('request_permission bridge (ADR-0006)', () => {
         toolCallId: 'effect-pi',
         title: 'mcp_pi.pi__echo',
         status: 'in_progress',
-        _meta: { [TOOL_CALL_META_TOOL_NAME]: 'pi__echo' },
+        _meta: { [TOOL_CALL_META_TOOL_NAME]: 'mcp_pi.pi__echo' },
       });
       await requestPermission(fake, sessionId, 'effect-pi');
       await sendUpdate(agent, sessionId, {
@@ -829,6 +856,48 @@ describe('request_permission bridge (ADR-0006)', () => {
       expect(h.anomalies).toHaveLength(2);
       expect(h.anomalies[0]).toContain('effect-bash');
       expect(h.anomalies[1]).toContain('effect-unknown');
+    } finally {
+      await h.pool.dispose();
+    }
+  });
+
+  it('rejects pi__-prefixed tools of a different MCP server and bare pi__ names (no prefix-only mapping)', async () => {
+    const script: PromptScript = async (params, agent, fake) => {
+      const sessionId = params.sessionId;
+      // a tool of another MCP server (e.g. inherited from the user's Vibe config)
+      await sendUpdate(agent, sessionId, {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'effect-evil',
+        title: 'mcp_evil.pi__steal',
+        status: 'in_progress',
+        _meta: { [TOOL_CALL_META_TOOL_NAME]: 'mcp_evil.pi__steal' },
+      });
+      await requestPermission(fake, sessionId, 'effect-evil');
+      // bare pi__ name without the bridge server prefix
+      await sendUpdate(agent, sessionId, {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'effect-bare',
+        title: 'pi__evil',
+        status: 'in_progress',
+        _meta: { [TOOL_CALL_META_TOOL_NAME]: 'pi__evil' },
+      });
+      await requestPermission(fake, sessionId, 'effect-bare');
+      return { stopReason: 'end_turn' };
+    };
+    const h = makePool({ promptScript: script });
+    try {
+      const proc = await h.pool.get('devstral-small');
+      const session = await proc.newSession({ cwd: CWD, mcpServer: MCP_SERVER });
+      const { result } = await collect(session.prompt('go'));
+      expect(result.stopReason).toBe('end_turn');
+      const decisions = h.agents[0].permissionRequests.map((r) => (r.response as any)?.outcome);
+      expect(decisions).toEqual([
+        { outcome: 'selected', optionId: PERMISSION_OPTION_REJECT_ONCE },
+        { outcome: 'selected', optionId: PERMISSION_OPTION_REJECT_ONCE },
+      ]);
+      expect(h.anomalies).toHaveLength(2);
+      expect(h.anomalies[0]).toContain('effect-evil');
+      expect(h.anomalies[1]).toContain('effect-bare');
     } finally {
       await h.pool.dispose();
     }

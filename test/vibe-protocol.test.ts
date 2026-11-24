@@ -7,6 +7,8 @@ import {
   buildAcpMcpServerEntry,
   buildEnabledToolsEnvValue,
   buildEnabledToolsGlobs,
+  buildBridgeToolMetaPrefix,
+  buildMcpDisplayNamePrefix,
   buildProviderProcessEnv,
   buildVibeMcpServersEnvValue,
   DISABLE_AUTO_APPROVE,
@@ -22,6 +24,7 @@ import {
   TOOL_CALL_META_EFFECT_KIND,
   TOOL_CALL_META_TOOL_NAME,
   TOOL_CALL_UPDATE_RAW_OUTPUT_APPROVAL,
+  MCP_DISPLAY_NAME_PREFIX,
   MODEL_CONFIG_OPTION_ID,
   PROMPT_RESPONSE_USAGE,
   UNIFIED_HARNESS_DISCOVERY_TOOL,
@@ -216,5 +219,22 @@ describe('sanitizeInheritedEnv (AGENTS.md §15: no inherited VIBE_* reaches the 
     const env = buildProviderProcessEnv({ modelAlias: 'm', mcpServer: MCP_SERVER });
     expect(env).not.toHaveProperty(VIBE_HOME_ENV_KEY);
     for (const key of NEVER_SET_ENV_KEYS) expect(env).not.toHaveProperty(key);
+  });
+});
+
+describe('bridge tool _meta.tool_name prefix (3.1.4 wire form)', () => {
+  it('pins the unified-harness mcp_<server>. display-name prefix and the pi__ tool prefix', () => {
+    expect(MCP_DISPLAY_NAME_PREFIX).toBe('mcp_');
+    expect(PI_TOOL_PREFIX).toBe('pi__');
+  });
+
+  it('builds mcp_<server>.pi__ from the MCP server name, normalizing the name like Vibe', () => {
+    // observed on the wire (spikes/out/*-acp-raw.jsonl): "tool_name":"mcp_pi.pi__echo"
+    expect(buildBridgeToolMetaPrefix('pi')).toBe('mcp_pi.pi__');
+    expect(buildBridgeToolMetaPrefix('pislow')).toBe('mcp_pislow.pi__');
+    // Vibe normalizes the server name ([^A-Za-z0-9_-] → _) in display names
+    expect(buildBridgeToolMetaPrefix('my server')).toBe('mcp_my_server.pi__');
+    expect(buildMcpDisplayNamePrefix('pi')).toBe('mcp_pi.');
+    expect(buildMcpDisplayNamePrefix('my server')).toBe('mcp_my_server.');
   });
 });

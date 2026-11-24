@@ -125,6 +125,37 @@ export const DISABLE_AUTO_APPROVE = 'false';
 export const PI_TOOL_PREFIX = 'pi__';
 
 /**
+ * Unified-harness display-name prefix for MCP tools: on vibe-acp 3.1.4 a
+ * tool of server `<server>` is displayed — and reported in
+ * `tool_call._meta.tool_name` — as `mcp_<server>.<tool>` (wire evidence:
+ * `spikes/out/*-acp-raw.jsonl`, e.g. `"tool_name":"mcp_pi.pi__echo"`;
+ * research doc "MCP naming", `mistral.vibe.mcp-naming/v1`). Pinned so a
+ * rename fails loudly here.
+ */
+export const MCP_DISPLAY_NAME_PREFIX = 'mcp_';
+
+/**
+ * The `mcp_<server>.` display-name prefix for a given MCP server (Vibe
+ * normalizes the server name, `[^A-Za-z0-9_-]` → `_`, in display names).
+ */
+export function buildMcpDisplayNamePrefix(mcpServerName: string): string {
+  const normalized = mcpServerName.replace(/[^A-Za-z0-9_-]/g, '_');
+  return `${MCP_DISPLAY_NAME_PREFIX}${normalized}.`;
+}
+
+/**
+ * The prefix of `tool_call._meta.tool_name` for tools of the bridge's own
+ * MCP server (3.1.4 wire form): `mcp_<server>.pi__<tool>`. Vibe normalizes
+ * the server name in display names (`[^A-Za-z0-9_-]` → `_`, research doc
+ * "ACP mcpServers"), so the prefix uses the normalized name. Used to map
+ * `session/request_permission` toolCallIds to bridge tools (ADR-0006) — a
+ * `pi__`-prefixed tool of any OTHER server must not match.
+ */
+export function buildBridgeToolMetaPrefix(mcpServerName: string): string {
+  return `${buildMcpDisplayNamePrefix(mcpServerName)}${PI_TOOL_PREFIX}`;
+}
+
+/**
  * The `VIBE_ENABLED_TOOLS` globs for the bridge's own MCP server: the server
  * publishes each Pi tool as `pi__<tool>`, so the published display name is
  * `{server}_pi__<tool>` and the allowlist is `["<server>_pi__*"]` (the paid
@@ -243,10 +274,12 @@ export function acpClientInfo(): Implementation {
 export const SESSION_NEW_META_WORKSPACE_TRUST = 'workspace_trust';
 
 /**
- * `tool_call._meta.tool_name`: the called tool's name (for MCP tools the remote
- * name behind the `mcp_<server>.` title). Used to map a
+ * `tool_call._meta.tool_name`: the called tool's display name. For MCP tools
+ * on 3.1.4 that is the full `mcp_<server>.<tool>` form (e.g.
+ * `"mcp_pi.pi__echo"`, wire evidence `spikes/out/*-acp-raw.jsonl`); builtins
+ * carry their own name (`"file_system.bash"`). Used to map a
  * `session/request_permission`'s `toolCallId` back to the preceding
- * `tool_call` (ADR-0006).
+ * `tool_call` (ADR-0006) — see {@link buildBridgeToolMetaPrefix}.
  */
 export const TOOL_CALL_META_TOOL_NAME = 'tool_name';
 
