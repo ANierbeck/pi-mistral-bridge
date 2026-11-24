@@ -206,6 +206,11 @@ export class MistralProvider {
   private aliasByApiId: ReadonlyMap<string, string>;
   private bridge: McpBridge | null = null;
   private pool: VibeProcessPool | null = null;
+  /**
+   * One memoized in-flight resource creation: concurrent first calls share it,
+   * so a racing second `ensureResources` can never leak a second bridge/pool.
+   */
+  private resourcesPromise: Promise<void> | null = null;
   private readonly live = new Map<string, LiveTurn>();
   private disposed = false;
 
@@ -239,6 +244,32 @@ export class MistralProvider {
   private async ensureResources(): Promise<void> {
     if (this.disposed) throw new AcpClientError('protocol', 'MistralProvider is disposed');
     if (this.bridge && this.pool) return;
+    let promise = this.resourcesPromise;
+    if (!promise) {
+      promise = this.createResources();
+      this.resourcesPromise = promise;
+      // a failed creation must not poison later calls: reset so the next call retries
+      promise.catch(() => {
+        if (this.resourcesPromise === promise) this.resourcesPromise = null;
+      });
+    }
+    await promise;
+    if (this.disposed) {
+      // dispose() ran while the creation was in flight and may have seen null
+      // before the assignment: close whatever was created now and fail the
+      // call — no orphaned bridge socket or vibe-acp child (AGENTS.md §15)
+      const bridge = this.bridge;
+      const pool = this.pool;
+      this.bridge = null;
+      this.pool = null;
+      if (pool) await pool.dispose().catch(() => {});
+      if (bridge) await bridge.close().catch(() => {});
+      throw new AcpClientError('protocol', 'MistralProvider is disposed');
+    }
+  }
+
+  /** One bridge + one pool, assigned to the provider fields (memoized by ensureResources). */
+  private async createResources(): Promise<void> {
     const { config } = this.options;
     const logDir = this.options.logDir ?? defaultDebugLogDir();
     const logger = config.debug
@@ -279,6 +310,7 @@ export class MistralProvider {
     const bridge = this.bridge;
     this.pool = null;
     this.bridge = null;
+    this.resourcesPromise = null;
     if (pool) await pool.dispose().catch(() => {});
     if (bridge) await bridge.close().catch(() => {});
   }

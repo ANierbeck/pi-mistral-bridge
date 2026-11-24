@@ -116,6 +116,7 @@ interface ProviderHarness {
   fake: FakeSpawnHarness;
   anomalies: string[];
   bridge: () => McpBridge;
+  bridgeCount: () => number;
   mcpClient: () => Promise<Client>;
   prompts: () => Array<{ method: string; params: any }>;
   sessionNews: () => number;
@@ -133,6 +134,7 @@ function makeProvider(behavior: FakeBehavior = {}): ProviderHarness {
   const fake = makeFakeSpawn(behavior);
   const anomalies: string[] = [];
   let bridge: McpBridge | null = null;
+  let bridgeCount = 0;
   let client: Client | null = null;
   const provider = new MistralProvider({
     config: CONFIG,
@@ -142,6 +144,7 @@ function makeProvider(behavior: FakeBehavior = {}): ProviderHarness {
     onAnomaly: (message) => anomalies.push(message),
     logDir: LOG_DIR,
     createBridge: async (options: CreateMcpBridgeOptions) => {
+      bridgeCount += 1;
       bridge = await createMcpBridge({ batchWindowMs: 30, ...options });
       bridges.push(bridge);
       return bridge;
@@ -155,6 +158,7 @@ function makeProvider(behavior: FakeBehavior = {}): ProviderHarness {
       if (!bridge) throw new Error('bridge not created yet');
       return bridge;
     },
+    bridgeCount: () => bridgeCount,
     mcpClient: async () => {
       if (!client) {
         const b = bridge!;
@@ -762,6 +766,77 @@ describe('MistralProvider.streamSimple: model switch (ADR-0007)', () => {
       expect(promptsOf(h, 1)).toHaveLength(1); // no new prompt: the parked one resumed
     } finally {
       await h.provider.dispose();
+    }
+  });
+});
+
+describe('MistralProvider: resource creation races (one bridge/pool, dispose during ensure)', () => {
+  it('creates exactly one bridge and one vibe-acp child for concurrent first calls', async () => {
+    const h = makeProvider({ promptScript: textTurnScript });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('a')]), {
+        sessionId: 'pi-1',
+      });
+      const stream2 = h.provider.streamSimple(MODEL, contextOf([user('b')]), {
+        sessionId: 'pi-2',
+      });
+      const [first, second] = await Promise.all([collectStream(stream1), collectStream(stream2)]);
+      expect(first.message.stopReason).toBe('stop');
+      expect(second.message.stopReason).toBe('stop');
+      // both turns shared ONE memoized resource creation: no leaked second bridge
+      expect(h.bridgeCount()).toBe(1);
+      expect(h.fake.spawns).toHaveLength(1); // one pool child serves both sessions
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('dispose() during resource creation closes what was created and rejects the call', async () => {
+    const fake = makeFakeSpawn({ promptScript: textTurnScript });
+    let bridgeClosed = false;
+    let started!: () => void;
+    const startedP = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: (bridge: McpBridge) => void;
+    const gate = new Promise<McpBridge>((resolve) => {
+      release = resolve;
+    });
+    const provider = new MistralProvider({
+      config: CONFIG,
+      cwd: CWD,
+      aliasByApiId: ALIAS_BY_API_ID,
+      spawnChild: fake.spawnChild,
+      onAnomaly: () => {},
+      logDir: LOG_DIR,
+      createBridge: async (_options: CreateMcpBridgeOptions) => {
+        started();
+        const b = await gate;
+        const origClose = b.close.bind(b);
+        b.close = async () => {
+          bridgeClosed = true;
+          await origClose();
+        };
+        bridges.push(b);
+        return b;
+      },
+    });
+    try {
+      const stream = provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+      });
+      await startedP; // the bridge creation is in flight
+      await provider.dispose(); // dispose while ensureResources() is awaiting
+      release(await createMcpBridge({ batchWindowMs: 30 })); // creation completes after dispose
+      const result = await collectStream(stream); // must settle, not hang
+      expect(result.types).toContain('error');
+      expect(result.message.stopReason).toBe('error');
+      // the bridge created after dispose was closed again (no orphaned socket)
+      expect(bridgeClosed).toBe(true);
+      // no vibe-acp child was spawned for the disposed provider
+      expect(fake.spawns).toHaveLength(0);
+    } finally {
+      await provider.dispose();
     }
   });
 });
