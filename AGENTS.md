@@ -62,7 +62,7 @@ changing behaviour.
 - **All documentation and comments are in English** — code comments, JSDoc,
   Markdown (README, CHANGELOG, plans, ADRs, this file), commit messages, type
   definitions, log and error messages. Rationale: international project.
-- User-facing chat with the owner in German is fine — that is conversation,
+- User-facing chat with the owner in his own language is fine — that is conversation,
   not project documentation.
 
 ## 4. Tests & verification before push (TDD)
