@@ -7,3 +7,6 @@ coverage/
 .env*
 .DS_Store
 .worktrees/
+
+# spike raw logs (JSON-RPC traces, never committed)
+spikes/out/
