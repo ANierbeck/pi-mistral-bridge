@@ -158,7 +158,7 @@ export function registerMistralProvider(
     spawnChild: deps.spawnChild,
     onAnomaly: deps.onAnomaly,
     logDir: deps.logDir,
-    onUsageContextSize: (apiId, contextSize) =>
+    onUsageContextSize: (apiId, contextSize): void =>
       catalogRef.current?.noteContextSize(apiId, contextSize),
   });
 
