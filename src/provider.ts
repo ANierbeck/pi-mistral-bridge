@@ -337,7 +337,7 @@ export class MistralProvider {
     if (bridge) await bridge.close().catch(() => {});
   }
 
-  /** `session_shutdown`: no orphaned processes or sockets (AGENTS.md §15). */
+  /** `session_shutdown`: no orphaned processes, sockets, or hanging streams (AGENTS.md §15). */
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
@@ -346,6 +346,21 @@ export class MistralProvider {
         hook();
       } catch {
         // a failing hook must not block the rest of the teardown
+      }
+    }
+    // End every in-flight stream FIRST, so no caller is left waiting on a
+    // stream whose consume loop may never run again after the teardown (the
+    // child kill settles the prompt asynchronously — racing live.clear()).
+    for (const live of this.live.values()) {
+      const turn = live.current;
+      if (!turn.ended) {
+        this.endAborted(
+          turn.stream,
+          live.state,
+          turn.message,
+          'pi session ended (provider disposed)'
+        );
+        turn.ended = true;
       }
     }
     await this.disposeResources();

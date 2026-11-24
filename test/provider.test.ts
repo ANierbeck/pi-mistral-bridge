@@ -89,6 +89,19 @@ const TOOLS: Tool[] = [
 
 const SYSTEM_PROMPT = 'You are a helpful assistant.';
 
+/** Captured result of a parked MCP call. */
+interface ParkedResult {
+  isError: boolean | undefined;
+  text: string | undefined;
+}
+
+/** A second Pi tool so a batch can contain two different parked calls. */
+const READ_TOOL: Tool = {
+  name: 'read',
+  description: 'Read a file',
+  parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+};
+
 const ts = 1_700_000_000_000;
 
 function user(content: UserMessage['content']): UserMessage {
@@ -1194,6 +1207,299 @@ describe('MistralProvider.streamSimple: steering abandons a parked prompt (ADR-0
     } finally {
       await h.provider.dispose();
     }
+  });
+});
+
+describe('MistralProvider.streamSimple: review T5 #16 test gaps (ADR-0002/0003)', () => {
+  it('partial toolResults (only some parked calls answered) rebuild instead of continuing', async () => {
+    const parked: ParkedResult[] = [];
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount !== 1) return { stopReason: 'end_turn' };
+        const sessionId = params.sessionId;
+        await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'a' });
+        await sendToolCallUpdate(agent, sessionId, 'effect-2', { path: '/x' });
+        const client = await h.mcpClient();
+        const p1 = client.callTool({ name: 'pi__echo', arguments: { text: 'a' } });
+        const p2 = client.callTool({ name: 'pi__read', arguments: { path: '/x' } });
+        const [r1, r2] = (await Promise.all([p1, p2])) as Array<{
+          content: Array<{ text?: string }>;
+          isError?: boolean;
+        }>;
+        parked.push(
+          { isError: r1.isError, text: r1.content[0]?.text },
+          { isError: r2.isError, text: r2.content[0]?.text }
+        );
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const stream1 = h.provider.streamSimple(
+        MODEL,
+        contextOf([user('run tools')], [TOOLS[0], READ_TOOL]),
+        { sessionId: 'pi-1' }
+      );
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('toolUse');
+      const calls = first.message.content.filter((b) => b.type === 'toolCall');
+      expect(calls).toHaveLength(2); // both parked calls in one batch
+
+      // only ONE of the two parked calls gets a toolResult -> decideFlow
+      // rebuilds (a partial answer is not a valid continuation)
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf(
+          [
+            user('run tools'),
+            first.message,
+            toolResult(calls[0].type === 'toolCall' ? calls[0].id : '', 'echo', 'out'),
+          ],
+          [TOOLS[0], READ_TOOL]
+        ),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.sessionNews()).toBe(2); // fresh session, not a continuation
+      // both parked calls were released with an error by the rebuild
+      expect(parked).toEqual([
+        { isError: true, text: 'turn abandoned: steering or model switch (ADR-0003)' },
+        { isError: true, text: 'turn abandoned: steering or model switch (ADR-0003)' },
+      ]);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('second tool round on the resumed stream parks again (toolUse twice, then stop)', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount !== 1) return { stopReason: 'end_turn' };
+        const sessionId = params.sessionId;
+        // the SAME prompt runs two sequential tool rounds; each callTool parks
+        // until the corresponding streamSimple delivers its toolResult
+        for (const round of [1, 2]) {
+          await sendToolCallUpdate(agent, sessionId, `effect-${round}`, { text: `r${round}` });
+          const client = await h.mcpClient();
+          const result = (await client.callTool({
+            name: 'pi__echo',
+            arguments: { text: `r${round}` },
+          })) as { content: Array<{ text?: string }> };
+          await sendUpdate(agent, sessionId, {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `after r${round}: ${result.content[0]?.text}` },
+          });
+        }
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('two rounds')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('toolUse');
+      const call1 = first.message.content.find((b) => b.type === 'toolCall');
+      if (call1?.type !== 'toolCall') throw new Error('expected toolCall');
+
+      // deliver round 1's result -> the same prompt continues and parks again
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf([user('two rounds'), first.message, toolResult(call1.id, 'echo', 'output-1')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('toolUse'); // second round parked
+      expect(
+        second.message.content.some(
+          (b) => b.type === 'text' && b.text.includes('after r1: output-1')
+        )
+      ).toBe(true);
+      const call2 = second.message.content.find((b) => b.type === 'toolCall');
+      if (call2?.type !== 'toolCall') throw new Error('expected second toolCall');
+      expect(h.sessionNews()).toBe(1); // still the same ACP session/prompt
+
+      // deliver round 2's result -> the prompt finishes
+      const stream3 = h.provider.streamSimple(
+        MODEL,
+        contextOf([
+          user('two rounds'),
+          first.message,
+          toolResult(call1.id, 'echo', 'output-1'),
+          second.message,
+          toolResult(call2.id, 'echo', 'output-2'),
+        ]),
+        { sessionId: 'pi-1' }
+      );
+      const third = await collectStream(stream3);
+      expect(third.message.stopReason).toBe('stop');
+      expect(
+        third.message.content.some(
+          (b) => b.type === 'text' && b.text.includes('after r2: output-2')
+        )
+      ).toBe(true);
+      expect(h.sessionNews()).toBe(1);
+      expect(h.prompts()).toHaveLength(1); // one prompt, three Pi turns
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('abort while parked: session cancelled + dirty, the parked call is released on the next rebuild', async () => {
+    const parked: { current: ParkedResult | null } = { current: null };
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount !== 1) return { stopReason: 'end_turn' };
+        const sessionId = params.sessionId;
+        await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'hi' });
+        const client = await h.mcpClient();
+        const pending = client.callTool({ name: 'pi__echo', arguments: { text: 'hi' } });
+        // capture the parked call's result whenever it resolves (release on
+        // rebuild / pre-timeout), without blocking the prompt
+        void pending.then((result) => {
+          const r = result as { content: Array<{ text?: string }>; isError?: boolean };
+          parked.current = { isError: r.isError, text: r.content[0]?.text };
+        });
+        // the prompt settles as cancelled when session/cancel arrives (abort)
+        return new Promise((resolve) => {
+          h.fake.behavior.onCancel = () => resolve({ stopReason: 'cancelled' });
+        });
+      },
+    });
+    try {
+      const controller = new AbortController();
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('run tool')]), {
+        sessionId: 'pi-1',
+        signal: controller.signal,
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('toolUse');
+
+      controller.abort(); // abort while the prompt is parked
+      await waitFor(
+        () => h.fake.agents[0].recorded.filter((r) => r.method === 'session/cancel').length >= 1,
+        'session/cancel'
+      );
+      await sleep(150); // the cancelled prompt settles
+
+      // the next call rebuilds (dirty) and releases the parked call
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf([user('run tool'), first.message, user('again')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.sessionNews()).toBe(2);
+      await waitFor(() => parked.current !== null, 'parked call released');
+      expect(parked.current).toEqual({
+        isError: true,
+        text: 'turn abandoned: steering or model switch (ADR-0003)',
+      });
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('pre-timeout while Pi still runs the tool: the parked call gets an isError budget answer, the next call rebuilds instead of hanging', async () => {
+    const parked: { current: ParkedResult | null } = { current: null };
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount !== 1) return { stopReason: 'end_turn' };
+        const sessionId = params.sessionId;
+        await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'slow' });
+        const client = await h.mcpClient();
+        const result = (await client.callTool({
+          name: 'pi__echo',
+          arguments: { text: 'slow' },
+        })) as { content: Array<{ text?: string }>; isError?: boolean };
+        parked.current = { isError: result.isError, text: result.content[0]?.text };
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('slow tool')]), {
+        sessionId: 'pi-1',
+      });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('toolUse');
+      const call = first.message.content.find((b) => b.type === 'toolCall');
+      if (call?.type !== 'toolCall') throw new Error('expected toolCall');
+
+      // Pi never answers: the bridge's pre-timeout (CONFIG.toolPreTimeoutMs)
+      // answers the parked call itself with an isError budget result
+      await waitFor(() => parked.current !== null, 'pre-timeout answer', 5_000);
+      expect(parked.current?.isError).toBe(true);
+      expect(parked.current?.text).toContain('did not finish within');
+      await sleep(100); // the prompt settles after the answered call
+
+      // a late toolResult for the timed-out call must not hang: the prompt is
+      // settled, so the turn rebuilds
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf([user('slow tool'), first.message, toolResult(call.id, 'echo', 'late')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.sessionNews()).toBe(2); // rebuild, not a continuation
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('crash mid-turn: error event + dirty session, the next call rebuilds on a respawned process', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount !== 1) return { stopReason: 'end_turn' };
+        const sessionId = params.sessionId;
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'partial before crash' },
+        });
+        return new Promise(() => {}); // never settles; the child crashes instead
+      },
+    });
+    try {
+      const stream1 = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+      });
+      await waitFor(() => h.prompts().length === 1, 'prompt start');
+      await sleep(100); // let the partial text through
+      h.fake.children[0].crash(1);
+      const first = await collectStream(stream1);
+      expect(first.types).toContain('error');
+      expect(first.message.stopReason).toBe('error');
+      expect(first.message.errorMessage).toBeTruthy();
+      expect(first.message.content).toEqual([{ type: 'text', text: 'partial before crash' }]);
+
+      // the session is dirty: the next call rebuilds on a respawned child
+      const stream2 = h.provider.streamSimple(MODEL, contextOf([user('hi'), user('retry')]), {
+        sessionId: 'pi-1',
+      });
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.fake.spawns).toHaveLength(2); // respawned
+      expect(h.sessionNews()).toBe(2);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('dispose mid-turn: the in-flight stream is ended, no caller left hanging (AGENTS.md §15)', async () => {
+    const h = makeProvider({
+      promptScript: () => new Promise(() => {}), // never settles
+    });
+    const stream = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+      sessionId: 'pi-1',
+    });
+    await waitFor(() => h.prompts().length === 1, 'prompt start');
+    const collecting = collectStream(stream);
+    await h.provider.dispose();
+    const result = await Promise.race([collecting, sleep(2_000).then(() => null as null)]);
+    expect(result).not.toBeNull(); // the stream must have ended on dispose
+    expect(result?.message.stopReason).toBe('aborted');
+    expect(result?.types).toContain('error');
   });
 });
 
