@@ -115,6 +115,13 @@ real `vibe-acp` only with per-run owner approval (`MISTRAL_BRIDGE_IT=1`).
   - ADR-0005's cache file ("cached under the bridge's own cache file, so
     the next Pi start can register…") is NOT implemented: the catalog is
     in-memory (src/models.ts) and re-discovers on every Pi start.
+
+  **Provider-name amendment (T5/T7, 2026-11-24):** ADR-0002's "default
+  `mistral-vibe`" is superseded by ADR-0009 (Proposed 2026-11-24 —
+  `docs/adr/0009-provider-name-default-mistral-bridge.md`): the default
+  `providerName` is now `mistral-bridge`, so models are addressed as
+  `mistral-bridge/<apiModelId>`. ADR-0002's body is immutable (§12), so this
+  plan records the amendment instead of editing the ADR.
 - [ ] **T8 Docs + review.** README (install, config, both modes, verified
       Vibe versions, honest note on provider-mode policy risk per ADR-0002),
       (PI.md was later dropped — pi.dev renders the package README; see

@@ -12,6 +12,11 @@ billing change from 2026-12-01 moves usage of third-party harnesses that do
 not go through a Mistral harness onto the API allowance — this bridge keeps
 you on the Vibe allowance because it drives Vibe itself.
 
+The bridge-provider pattern — an external agent exposed as a Pi model
+provider — is modelled on
+[pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) (see
+Acknowledgments).
+
 **What it is not.**
 
 - **Not a Mistral API-key client** — it never calls the Mistral HTTP API
@@ -259,5 +264,9 @@ Gates before every commit: `npm run typecheck`, `npm run lint`,
 `npm run format:check`, `npx vitest run`, `npm run test:coverage`,
 `npm run build`, `npm run secret-scan`.
 
-The architecture is modeled on
-[pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge).
+## Acknowledgments
+
+Modelled on [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
+(npm: [pi-claude-bridge](https://www.npmjs.com/package/pi-claude-bridge)) by
+Eli Dickinson — the bridge-provider pattern (external agent as a Pi model
+provider) follows that project.

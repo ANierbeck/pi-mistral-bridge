@@ -48,6 +48,10 @@ Semantic Versioning.
   from Vibe usage updates and Pi's own registry.
 - **T8 — Documentation:** README (install, both modes, configuration
   reference, security notes, troubleshooting), this changelog.
+- **Acknowledgments:** the README gained an Acknowledgments section crediting
+  pi-claude-bridge (https://github.com/elidickinson/pi-claude-bridge, npm:
+  pi-claude-bridge) by Eli Dickinson as the inspiration for the
+  bridge-provider pattern.
 
 ### Fixed
 
@@ -77,3 +81,7 @@ Semantic Versioning.
   and `homepage`; `PI.md` was deleted and removed from `files` — pi.dev
   renders the package README and has no PI.md special file (verified against
   https://pi.dev/packages/pi-claude-bridge).
+- **Default provider name:** the Pi provider the bridge registers is now
+  named `mistral-bridge` by default (was `mistral-vibe`); models are addressed
+  as `mistral-bridge/<apiModelId>`. The `providerName` config key is unchanged
+  and still overrides the default (ADR-0009, proposed).
