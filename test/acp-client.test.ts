@@ -365,7 +365,11 @@ describe('VibeProcessPool: spawn, env, handshake, dispose', () => {
       expect(mcpServers).toHaveLength(1);
       expect(mcpServers[0].name).toBe('pi');
       expect(mcpServers[0].url).toBe(MCP_SERVER.url);
-      for (const key of NEVER_SET_ENV_KEYS) expect(env).not.toHaveProperty(key);
+      // the bridge never SETS a never-set key; an inherited VIBE_HOME passes through
+      for (const key of NEVER_SET_ENV_KEYS) {
+        if (key in process.env) expect(env[key]).toBe(process.env[key]);
+        else expect(env).not.toHaveProperty(key);
+      }
 
       const init = h.agents[0].recorded.find((r) => r.method === 'initialize');
       expect(init).toBeDefined();
@@ -380,6 +384,36 @@ describe('VibeProcessPool: spawn, env, handshake, dispose', () => {
     }
     // no orphans: dispose kills the child (AGENTS.md §15)
     expect(h.children[0].killedWith.length).toBeGreaterThan(0);
+  });
+
+  it('sanitizes inherited VIBE_* env (drops VIBE_TOOLS/auto-approve, keeps VIBE_HOME and PATH/HOME)', async () => {
+    vi.stubEnv('VIBE_TOOLS', '{"x_pi__y":{"permission":"always"}}');
+    vi.stubEnv('VIBE_DEFAULT_APPROVAL_POLICY', 'auto');
+    vi.stubEnv('VIBE_ENABLE_AUTO_APPROVE', 'true');
+    vi.stubEnv('VIBE_HOME', '/custom/vibe-home');
+    try {
+      const h = makePool();
+      try {
+        await h.pool.get('devstral-small');
+        expect(h.spawns).toHaveLength(1);
+        const env = h.spawns[0].env;
+        // inherited VIBE_* keys that could auto-approve tools never reach the child
+        expect(env).not.toHaveProperty('VIBE_TOOLS');
+        // the bridge's own overlay wins over any inherited value
+        expect(env[VIBE_ENV.DEFAULT_APPROVAL_POLICY]).toBe('ask');
+        expect(env[VIBE_ENV.ENABLE_AUTO_APPROVE]).toBe('false');
+        // VIBE_HOME is the user's own Vibe installation (auth lives there): the
+        // bridge never SETS it (§14) but must not hide it either (§15)
+        expect(env.VIBE_HOME).toBe('/custom/vibe-home');
+        // non-VIBE vars pass through untouched
+        expect(env.PATH).toBe(process.env.PATH);
+        expect(env.HOME).toBe(process.env.HOME);
+      } finally {
+        await h.pool.dispose();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('reuses the pooled process for the same alias and pools per alias', async () => {

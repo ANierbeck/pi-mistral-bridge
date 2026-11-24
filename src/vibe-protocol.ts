@@ -72,12 +72,49 @@ export const VIBE_ENV = Object.freeze({
   MCP_SERVERS: 'VIBE_MCP_SERVERS',
 } as const);
 
+/** The `env_prefix` of Vibe's env config layer (`core/config/layers/environment.py`, research §d). */
+export const VIBE_ENV_PREFIX = 'VIBE_';
+
 /**
- * Env keys the bridge must NEVER set. Relocating `VIBE_HOME` for the child
- * would also hide Vibe's own auth from it (research §d; AGENTS.md §14), so it
- * is a hard invariant, pinned by a test.
+ * `VIBE_HOME` points at the user's own Vibe installation where their auth
+ * lives. The bridge must NEVER set it (relocating it would hide Vibe's auth
+ * from the child; AGENTS.md §14, research §d) — but it must not hide an
+ * inherited one either: `VIBE_HOME` is the user's own setting, so
+ * {@link sanitizeInheritedEnv} passes it through unchanged.
  */
-export const NEVER_SET_ENV_KEYS = Object.freeze(['VIBE_HOME']);
+export const VIBE_HOME_ENV_KEY = 'VIBE_HOME';
+
+/**
+ * Env keys the bridge must NEVER set on the child. Relocating `VIBE_HOME` for
+ * the child would also hide Vibe's own auth from it (research §d; AGENTS.md
+ * §14), so it is a hard invariant, pinned by a test on the
+ * {@link buildProviderProcessEnv} output.
+ */
+export const NEVER_SET_ENV_KEYS = Object.freeze([VIBE_HOME_ENV_KEY]);
+
+/**
+ * Sanitizes an inherited environment for the `vibe-acp` child: drops every
+ * `VIBE_*` key except {@link VIBE_HOME_ENV_KEY}. The child must not inherit
+ * arbitrary `VIBE_*` config from the Pi process — e.g. an inherited
+ * `VIBE_TOOLS={"x_pi__y":{"permission":"always"}}`,
+ * `VIBE_DEFAULT_APPROVAL_POLICY=auto` or `VIBE_ENABLE_AUTO_APPROVE=true`
+ * would auto-approve tools in provider mode (AGENTS.md §15). `VIBE_HOME` is
+ * the exception: it is the user's own Vibe installation location (their auth
+ * lives there), the bridge never sets it itself (§14) but must not hide it.
+ * Non-`VIBE_*` vars (PATH, HOME, …) pass through untouched; `undefined`
+ * values are dropped.
+ */
+export function sanitizeInheritedEnv(
+  env: Record<string, string | undefined>
+): Record<string, string> {
+  const clean: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (key.startsWith(VIBE_ENV_PREFIX) && key !== VIBE_HOME_ENV_KEY) continue;
+    clean[key] = value;
+  }
+  return clean;
+}
 
 /** Provider-mode approval policy (ADR-0006): the bridge answers every `session/request_permission` itself. */
 export const APPROVAL_POLICY_ASK = 'ask';
@@ -152,22 +189,21 @@ export interface ProviderProcessEnvParams {
 
 /**
  * The full `VIBE_*` env for a provider-mode `vibe-acp` child (ADR-0006 /
- * ADR-0007). Invariant: none of {@link NEVER_SET_ENV_KEYS} is ever present.
+ * ADR-0007). Invariant (AGENTS.md §14): the output never contains a
+ * {@link NEVER_SET_ENV_KEYS} key — pinned by
+ * `test/vibe-protocol.test.ts`, and enforced on the merged child env in
+ * `VibeAcpProcess.start` (src/acp-client.ts), where the check can actually
+ * fire. The bridge layers this over {@link sanitizeInheritedEnv} of the
+ * inherited `process.env`, never over the raw environment.
  */
 export function buildProviderProcessEnv(params: ProviderProcessEnvParams): Record<string, string> {
-  const env: Record<string, string> = {
+  return {
     [VIBE_ENV.ACTIVE_MODEL]: params.modelAlias,
     [VIBE_ENV.DEFAULT_APPROVAL_POLICY]: APPROVAL_POLICY_ASK,
     [VIBE_ENV.ENABLE_AUTO_APPROVE]: DISABLE_AUTO_APPROVE,
     [VIBE_ENV.ENABLED_TOOLS]: buildEnabledToolsEnvValue(params.mcpServer.name),
     [VIBE_ENV.MCP_SERVERS]: buildVibeMcpServersEnvValue(params.mcpServer),
   };
-  for (const key of NEVER_SET_ENV_KEYS) {
-    if (key in env) {
-      throw new Error(`internal error: ${key} must never be set by the bridge (AGENTS.md §14)`);
-    }
-  }
-  return env;
 }
 
 /**

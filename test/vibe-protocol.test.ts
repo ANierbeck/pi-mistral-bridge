@@ -12,6 +12,9 @@ import {
   DISABLE_AUTO_APPROVE,
   EXT_NOTIFICATION_CONFIG_CHANGED,
   NEVER_SET_ENV_KEYS,
+  sanitizeInheritedEnv,
+  VIBE_ENV_PREFIX,
+  VIBE_HOME_ENV_KEY,
   PERMISSION_OPTION_ALLOW_ONCE,
   PERMISSION_OPTION_REJECT_ONCE,
   PI_TOOL_PREFIX,
@@ -174,5 +177,44 @@ describe('Vibe-specific ACP _meta / extension surfaces (pinned literals)', () =>
 
   it('pins the session/prompt response usage field (unstable ACP v1 field Vibe populates)', () => {
     expect(PROMPT_RESPONSE_USAGE).toBe('usage');
+  });
+});
+
+describe('sanitizeInheritedEnv (AGENTS.md §15: no inherited VIBE_* reaches the child)', () => {
+  it('pins the Vibe env-layer prefix and the VIBE_HOME exception', () => {
+    expect(VIBE_ENV_PREFIX).toBe('VIBE_');
+    expect(VIBE_HOME_ENV_KEY).toBe('VIBE_HOME');
+    expect(NEVER_SET_ENV_KEYS).toEqual([VIBE_HOME_ENV_KEY]);
+  });
+
+  it('drops every inherited VIBE_* key except VIBE_HOME (e.g. VIBE_TOOLS auto-approve, auto-approve policy)', () => {
+    const env = sanitizeInheritedEnv({
+      PATH: '/usr/bin:/bin',
+      HOME: '/var/test-home',
+      VIBE_TOOLS: '{"x_pi__y":{"permission":"always"}}',
+      VIBE_DEFAULT_APPROVAL_POLICY: 'auto',
+      VIBE_ENABLE_AUTO_APPROVE: 'true',
+      VIBE_ANYTHING_ELSE: '1',
+      VIBE_HOME: '/custom/vibe-home',
+      UNRELATED: 'keep',
+    });
+    expect(env).toEqual({
+      PATH: '/usr/bin:/bin',
+      HOME: '/var/test-home',
+      VIBE_HOME: '/custom/vibe-home',
+      UNRELATED: 'keep',
+    });
+  });
+
+  it('passes an inherited VIBE_HOME through unchanged and drops undefined values', () => {
+    const env = sanitizeInheritedEnv({ VIBE_HOME: '/opt/vibe', MAYBE: undefined });
+    expect(env).toEqual({ VIBE_HOME: '/opt/vibe' });
+    expect(sanitizeInheritedEnv({})).toEqual({});
+  });
+
+  it('keeps the buildProviderProcessEnv invariant: its output never contains VIBE_HOME', () => {
+    const env = buildProviderProcessEnv({ modelAlias: 'm', mcpServer: MCP_SERVER });
+    expect(env).not.toHaveProperty(VIBE_HOME_ENV_KEY);
+    for (const key of NEVER_SET_ENV_KEYS) expect(env).not.toHaveProperty(key);
   });
 });

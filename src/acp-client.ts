@@ -43,6 +43,8 @@ import {
   acpClientInfo,
   buildAcpMcpServerEntry,
   buildProviderProcessEnv,
+  NEVER_SET_ENV_KEYS,
+  sanitizeInheritedEnv,
   type BridgeMcpServer,
 } from './vibe-protocol.ts';
 
@@ -687,14 +689,25 @@ export class VibeAcpProcess {
 
   /** Spawns the child, wires the ACP client and performs the `initialize` handshake. */
   static async start(options: VibeAcpProcessOptions): Promise<VibeAcpProcess> {
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value !== undefined) env[key] = value;
-    }
+    // Inherited env is sanitized first (AGENTS.md §15): every inherited
+    // `VIBE_*` key except `VIBE_HOME` is dropped so nothing from the Pi
+    // process (e.g. `VIBE_TOOLS={"x":{"permission":"always"}}` or
+    // `VIBE_ENABLE_AUTO_APPROVE=true`) can auto-approve tools in the child;
+    // the bridge's own provider env is layered on top (ADR-0006).
+    const env = sanitizeInheritedEnv(process.env);
     Object.assign(
       env,
       buildProviderProcessEnv({ modelAlias: options.modelAlias, mcpServer: options.mcpServer })
     );
+    // Real invariant (AGENTS.md §14): the bridge never SETS a
+    // NEVER_SET_ENV_KEY on the child. An inherited `VIBE_HOME` (the user's
+    // own Vibe installation, where their auth lives) passes through
+    // unchanged; any other appearance here means the bridge itself set it.
+    for (const key of NEVER_SET_ENV_KEYS) {
+      if (key in env && !(key in process.env)) {
+        throw new Error(`internal error: the bridge must never set ${key} (AGENTS.md §14)`);
+      }
+    }
     const spawnChild = options.spawnChild ?? defaultSpawnChild;
     const child = spawnChild(options.vibeAcpPath, [], env, options.cwd);
     const debugLog = options.debug
