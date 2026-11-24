@@ -45,7 +45,7 @@
     "format:check": "node scripts/format.ts",
     "secret-scan": "node scripts/secret-scan.ts --staged-only",
     "prepare": "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git config core.hooksPath .githooks; fi",
-    "prepublishOnly": "if [ -z \"$(git tag --points-at HEAD 2>/dev/null)\" ]; then echo 'prepublishOnly: no git tag at HEAD - publishing requires the owner's explicit release approval naming the version (AGENTS.md §1)'; exit 1; fi"
+    "prepublishOnly": "if [ -z \"$(git tag --points-at HEAD 2>/dev/null)\" ]; then echo \"prepublishOnly: no git tag at HEAD - publishing requires an explicit release approval naming the version (AGENTS.md section 1)\"; exit 1; fi"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
