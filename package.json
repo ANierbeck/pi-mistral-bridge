@@ -1,6 +1,6 @@
 {
   "name": "@anierbeck/pi-mistral-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension exposing Mistral models via the user's vibe-acp over ACP",
   "keywords": [
     "pi",
@@ -74,5 +74,8 @@
     "typebox": "1.3.27",
     "typescript": "^5.9.3",
     "vitest": "^5.1.1"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
