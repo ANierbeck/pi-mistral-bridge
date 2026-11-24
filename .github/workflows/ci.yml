@@ -40,7 +40,8 @@ jobs:
         # Pi supplies @earendil-works/* and typebox to extensions
         # (peerDependencies "*"); a bundled copy would bypass Pi's extension
         # module mapping. Same assertion as test/bundle.test.ts.
-        run: node -e "const s = require('node:fs').readFileSync('dist/index.js', 'utf8'); if (s.includes('node_modules/@earendil-works') || s.includes('node_modules/typebox')) { console.error('dist/index.js inlines host-provided packages'); process.exit(1); } console.log('host-provided packages external: ok')"
+        run: |
+          node -e "const s = require('node:fs').readFileSync('dist/index.js', 'utf8'); if (s.includes('node_modules/@earendil-works') || s.includes('node_modules/typebox')) { console.error('dist/index.js inlines host-provided packages'); process.exit(1); } console.log('host-provided packages external: ok')"
 
       - name: Smoke-load the bundle
         run: node -e "import('./dist/index.js').then((m) => console.log('dist/index.js loads:', Object.keys(m)))"
