@@ -33,8 +33,8 @@ function assistant(
   return {
     role: 'assistant',
     content,
-    api: 'mistral-vibe',
-    provider: 'mistral-vibe',
+    api: 'mistral-bridge',
+    provider: 'mistral-bridge',
     model: 'some-model',
     usage: {
       input: 1,

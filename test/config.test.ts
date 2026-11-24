@@ -54,7 +54,7 @@ function loadError(cwd: string, home: string): string {
 describe('config defaults', () => {
   it('exports the documented default constants', () => {
     expect(DEFAULT_VIBE_ACP_PATH).toBe('vibe-acp');
-    expect(DEFAULT_PROVIDER_NAME).toBe('mistral-vibe');
+    expect(DEFAULT_PROVIDER_NAME).toBe('mistral-bridge');
     expect(DEFAULT_PROCESS_IDLE_TIMEOUT_MS).toBe(10 * 60 * 1000); // ADR-0007 pool reaper: 10 min
     expect(DEFAULT_TOOL_PRE_TIMEOUT_MS).toBe(55_000); // ADR-0006: pre-empt the hard 60 s budget
     expect(VIBE_TURN_BUDGET_MS).toBe(60_000); // Vibe 3.1.4 hardcoded per-turn budget
@@ -68,7 +68,7 @@ describe('config defaults', () => {
     const { home, cwd } = makeSandbox();
     expect(load(cwd, home)).toEqual({
       vibeAcpPath: 'vibe-acp',
-      providerName: 'mistral-vibe',
+      providerName: 'mistral-bridge',
       askVibe: { enabled: true, defaultMode: 'ask', autoApprove: false },
       debug: false,
       processIdleTimeoutMs: 600_000,

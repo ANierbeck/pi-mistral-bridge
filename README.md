@@ -12,6 +12,11 @@ billing change from 2026-12-01 moves usage of third-party harnesses that do
 not go through a Mistral harness onto the API allowance — this bridge keeps
 you on the Vibe allowance because it drives Vibe itself.
 
+The bridge-provider pattern — an external agent exposed as a Pi model
+provider — is modelled on
+[pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) (see
+Acknowledgments).
+
 **What it is not.**
 
 - **Not a Mistral API-key client** — it never calls the Mistral HTTP API
@@ -33,17 +38,17 @@ per-session bearer token).
 It has two modes:
 
 - **Provider mode** — the models your `vibe-acp` reports appear in Pi's model
-  picker under a dedicated provider (default `mistral-vibe`); Pi owns the
+  picker under a dedicated provider (default `mistral-bridge`); Pi owns the
   agent loop and every tool call is executed by Pi.
 - **AskVibe mode** — a Pi tool (`ask_vibe`) that delegates a self-contained
   task to Vibe as a sub-agent with Vibe's own tools.
 
-**Always address bridge models as `mistral-vibe/<apiModelId>`.** Pi already
+**Always address bridge models as `mistral-bridge/<apiModelId>`.** Pi already
 has a builtin `mistral` provider (a plain HTTP API client keyed by a Mistral
 API key). The bridge registers its **own** provider (default name
-`mistral-vibe`, configurable via `providerName`), so `mistral/<id>` resolves
+`mistral-bridge`, configurable via `providerName`), so `mistral/<id>` resolves
 to Pi's builtin HTTP provider — **not** to this bridge. Use
-`mistral-vibe/<apiModelId>` everywhere (`--model`, `/model`, `pi -p`, …).
+`mistral-bridge/<apiModelId>` everywhere (`--model`, `/model`, `pi -p`, …).
 
 **Not affiliated with Mistral.** This is an independent bridge.
 
@@ -78,10 +83,10 @@ Restart or `/reload` Pi afterwards.
 
 1. Start Pi. The extension factory awaits the first model discovery (bounded
    by `startupDiscoveryTimeoutMs`, default 10 s), so the provider
-   `mistral-vibe` is registered before Pi's first render with exactly the
+   `mistral-bridge` is registered before Pi's first render with exactly the
    models your `vibe-acp` reports for your account (the list is discovered
    from Vibe, never hardcoded, and refreshed in the background).
-2. Select a `mistral-vibe/<apiModelId>` model and chat as usual — Pi runs the
+2. Select a `mistral-bridge/<apiModelId>` model and chat as usual — Pi runs the
    agent loop. (Do not use `mistral/<id>`: that is Pi's builtin HTTP provider,
    not this bridge — see the warning above.)
 3. To delegate a task to Vibe itself, ask the agent to use the `ask_vibe` tool
@@ -92,7 +97,7 @@ Restart or `/reload` Pi afterwards.
 
 ### Provider mode
 
-The bridge registers a Pi provider (default name `mistral-vibe`) whose models
+The bridge registers a Pi provider (default name `mistral-bridge`) whose models
 are the ones `vibe-acp` reports. For each Pi session it starts one ACP session
 to a per-model `vibe-acp` process whose only MCP server is the bridge's own
 loopback MCP server. That server listens on `127.0.0.1` only, on a random
@@ -176,7 +181,7 @@ ignored; invalid values are a hard error that names the file and the key.
 | Key                     | Default       | What it does                                                                                                                                                              |
 | ----------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `vibeAcpPath`           | `"vibe-acp"`  | Command or path used to spawn the `vibe-acp` process.                                                                                                                      |
-| `providerName`          | `"mistral-vibe"` | Name of the Pi provider the bridge registers. Must not collide with a provider Pi already registers (e.g. Pi's builtin `mistral`); in that case the bridge registers nothing and warns. |
+| `providerName`          | `"mistral-bridge"` | Name of the Pi provider the bridge registers. Must not collide with a provider Pi already registers (e.g. Pi's builtin `mistral`); in that case the bridge registers nothing and warns. |
 | `askVibe.enabled`       | `true`        | Whether the `ask_vibe` tool is registered.                                                                                                                                |
 | `askVibe.defaultMode`   | `"ask"`       | Default `mode` for `ask_vibe`: one of `ask`, `plan`, `edit`.                                                                                                               |
 | `askVibe.autoApprove`   | `false`       | Auto-approve Vibe permission requests in AskVibe mode. Off by default; without a UI, permission requests are always rejected regardless.                                    |
@@ -192,7 +197,7 @@ Example:
 
 ```json
 {
-  "providerName": "mistral-vibe",
+  "providerName": "mistral-bridge",
   "askVibe": { "enabled": true, "defaultMode": "ask", "autoApprove": false },
   "debug": false
 }
@@ -235,7 +240,7 @@ to anything under Vibe's own directory.
 
 ## Troubleshooting
 
-- **No `mistral-vibe` models in the picker**, or a `model discovery failed` /
+- **No `mistral-bridge` models in the picker**, or a `model discovery failed` /
   `vibe-acp --setup` hint on stderr: Vibe is probably not signed in. Run
   `vibe-acp --setup`, then `/reload` in Pi.
 - **Errors starting with `Mistral Vibe quota exceeded`**: Vibe surfaced a
@@ -259,5 +264,9 @@ Gates before every commit: `npm run typecheck`, `npm run lint`,
 `npm run format:check`, `npx vitest run`, `npm run test:coverage`,
 `npm run build`, `npm run secret-scan`.
 
-The architecture is modeled on
-[pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge).
+## Acknowledgments
+
+Modelled on [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
+(npm: [pi-claude-bridge](https://www.npmjs.com/package/pi-claude-bridge)) by
+Eli Dickinson — the bridge-provider pattern (external agent as a Pi model
+provider) follows that project.
