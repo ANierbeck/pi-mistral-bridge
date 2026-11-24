@@ -958,6 +958,8 @@ function sanitizeFileBase(alias: string): string {
  */
 export class VibeProcessPool {
   private readonly entries = new Map<string, PoolEntry>();
+  /** In-flight spawns by alias: concurrent `get`s share one spawn (no racing `entries.set`). */
+  private readonly pending = new Map<string, Promise<VibeAcpProcess>>();
   private readonly exitHook: () => void;
   private disposed = false;
   private spawnCounter = 0;
@@ -984,7 +986,33 @@ export class VibeProcessPool {
       }
       this.drop(modelAlias); // crashed: respawn on next use
     }
-    const proc = await VibeAcpProcess.start({
+    // Concurrent gets of the same alias share one in-flight spawn, so a
+    // racing second `entries.set` can never orphan the first child.
+    const proc = await (this.pending.get(modelAlias) ?? this.startPending(modelAlias));
+    if (this.disposed) {
+      // dispose() ran while the start was in flight: never register into a
+      // disposed pool — terminate the fresh child and fail (AGENTS.md §15).
+      await proc.terminate('pool-disposed-during-start').catch(() => {
+        // already dead
+      });
+      throw new AcpClientError('protocol', 'VibeProcessPool is disposed');
+    }
+    if (this.entries.get(modelAlias)?.process === proc) return proc; // a concurrent get already registered it
+    const entry: PoolEntry = {
+      alias: modelAlias,
+      process: proc,
+      idleTimer: setTimeout(() => this.reap(modelAlias), this.options.processIdleTimeoutMs),
+    };
+    proc.onExit = (p): void => {
+      if (this.entries.get(modelAlias)?.process === p) this.drop(modelAlias);
+    };
+    this.entries.set(modelAlias, entry);
+    return proc;
+  }
+
+  /** Starts one spawn for `modelAlias` and records it in {@link pending} until it settles. */
+  private startPending(modelAlias: string): Promise<VibeAcpProcess> {
+    const p = VibeAcpProcess.start({
       modelAlias,
       vibeAcpPath: this.options.vibeAcpPath,
       cwd: this.options.cwd,
@@ -996,16 +1024,12 @@ export class VibeProcessPool {
       onAnomaly: this.options.onAnomaly,
       logFileBase: `vibe-acp-${sanitizeFileBase(modelAlias)}-${++this.spawnCounter}`,
     });
-    const entry: PoolEntry = {
-      alias: modelAlias,
-      process: proc,
-      idleTimer: setTimeout(() => this.reap(modelAlias), this.options.processIdleTimeoutMs),
+    this.pending.set(modelAlias, p);
+    const cleanup = (): void => {
+      if (this.pending.get(modelAlias) === p) this.pending.delete(modelAlias);
     };
-    proc.onExit = (p): void => {
-      if (this.entries.get(modelAlias)?.process === p) this.drop(modelAlias);
-    };
-    this.entries.set(modelAlias, entry);
-    return proc;
+    p.then(cleanup, cleanup);
+    return p;
   }
 
   private touch(entry: PoolEntry): void {

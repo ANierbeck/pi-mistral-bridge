@@ -111,6 +111,8 @@ interface FakeBehavior {
   onCancel?: () => void;
   /** When set, the fake agent's initialize handler throws (start must not orphan the child). */
   failInitialize?: boolean;
+  /** When set, the fake agent's initialize handler awaits this first (lets a test dispose mid-start). */
+  onInitialize?: () => Promise<void>;
 }
 
 function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
@@ -134,6 +136,7 @@ function startFakeAgent(opts: FakeAgentOptions): FakeAgent {
     .agent({ name: 'fake-vibe-acp' })
     .onRequest(acp.AGENT_METHODS.initialize, async ({ params }) => {
       recorded.push({ method: 'initialize', params });
+      await behavior.onInitialize?.();
       if (behavior.failInitialize) throw acp.RequestError.internalError('fake initialize failure');
       return {
         protocolVersion: acp.PROTOCOL_VERSION,
@@ -259,6 +262,7 @@ function makePool(
     promptScript?: PromptScript;
     onCancel?: () => void;
     failInitialize?: boolean;
+    onInitialize?: () => Promise<void>;
     logDir?: string;
   } = {}
 ): Harness {
@@ -270,6 +274,7 @@ function makePool(
     promptScript: opts.promptScript,
     onCancel: opts.onCancel,
     failInitialize: opts.failInitialize,
+    onInitialize: opts.onInitialize,
   };
   const logDir = opts.logDir ?? mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-acp-logs-'));
   const spawnChild: SpawnChildFn = (command, args, env) => {
@@ -484,6 +489,44 @@ describe('VibeAcpProcess.start failure paths (no orphan window, AGENTS.md §15)'
     } finally {
       await h.pool.dispose();
     }
+  });
+});
+
+describe('VibeProcessPool races (AGENTS.md §15)', () => {
+  it('shares exactly one spawn between concurrent gets of the same alias', async () => {
+    const h = makePool();
+    try {
+      const [a, b] = await Promise.all([
+        h.pool.get('devstral-small'),
+        h.pool.get('devstral-small'),
+      ]);
+      expect(a).toBe(b);
+      expect(h.spawns).toHaveLength(1);
+      expect(h.pool.size).toBe(1);
+    } finally {
+      await h.pool.dispose();
+    }
+  });
+
+  it('terminates the fresh child and rejects when dispose() lands during an awaited start', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const h = makePool({ onInitialize: () => gate });
+    const getPromise = h.pool.get('devstral-small');
+    await vi.waitFor(() => expect(h.spawns).toHaveLength(1));
+    // dispose while the start is still in flight
+    await h.pool.dispose();
+    release();
+    await expect(getPromise).rejects.toThrow(/disposed/);
+    // the child spawned by the in-flight start must not survive
+    expect(h.children[0].killedWith.length).toBeGreaterThan(0);
+  });
+
+  it('throws on get after dispose', async () => {
+    const h = makePool();
+    await h.pool.get('devstral-small');
+    await h.pool.dispose();
+    await expect(h.pool.get('devstral-small')).rejects.toThrow(/disposed/);
   });
 });
 
