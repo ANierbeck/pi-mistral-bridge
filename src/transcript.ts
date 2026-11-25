@@ -9,7 +9,8 @@
  *
  * - {@link renderTranscript} renders a Pi message list as one compact
  *   plain-text prompt body for a REBUILD. The system prompt is NOT included
- *   here (the provider prepends it separately); user/assistant text is kept
+ *   here (the provider prepends it and {@link HISTORY_PREAMBLE} separately);
+ *   user/assistant text is kept
  *   in full, tool calls render as `[tool pi__<name> <args>]`, tool results
  *   are truncated with a marker, images as `[image]`.
  * - {@link renderDelta} renders only the newly appended message(s) as the
@@ -42,6 +43,17 @@ export const DEFAULT_MAX_TOOL_RESULT_CHARS = 2_000;
 export const TRUNCATED_MARKER = '… [truncated]';
 /** Marker prepended when the whole transcript was head-truncated. */
 export const HEAD_TRUNCATED_MARKER = '[... earlier transcript truncated ...]';
+
+/**
+ * Framing text the provider puts between the system prompt and a REBUILD
+ * transcript (src/provider.ts). A bare transcript log made a model imitate
+ * its `[tool …]` lines as text in a real run (it answered a tool request with
+ * the literal `[tool ask_vibe {…}]` after an abort-triggered rebuild), so the
+ * log is explicitly framed as read-only history. One short paragraph, no
+ * model names (AGENTS.md §9).
+ */
+export const HISTORY_PREAMBLE =
+  'The following is a plain-text log of the conversation so far, provided as read-only history for context. Lines like `[tool pi__<name> {...}]` and `[tool result ...]` are records of tool calls that were already executed, together with their results — they are history, not a format to imitate. Never write a tool call as text; when you need a tool, call it through the normal tool-calling interface (the tools of this Pi session are available to you as MCP tools with the `pi__` prefix). Respond to the last `[user]` message in the log.';
 
 /**
  * Canonical JSON (recursively sorted object keys) so identical values hash

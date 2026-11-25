@@ -14,6 +14,7 @@ import type {
 import {
   DEFAULT_MAX_TOOL_RESULT_CHARS,
   HEAD_TRUNCATED_MARKER,
+  HISTORY_PREAMBLE,
   TRUNCATED_MARKER,
   digestMessages,
   renderDelta,
@@ -256,5 +257,20 @@ describe('digestMessages (stable sha256 over role + content, ADR-0003)', () => {
     expect(digestMessages([toolResult('c', 't', [{ type: 'text', text: 'x' }])])).not.toBe(
       digestMessages([toolResult('c', 't', [{ type: 'text', text: 'x' }], true)])
     );
+  });
+});
+
+describe('HISTORY_PREAMBLE (rebuild prompt framing, ADR-0003)', () => {
+  it('is one short English paragraph that frames the transcript as a read-only log of already executed tool calls and forbids writing tool calls as text', () => {
+    expect(typeof HISTORY_PREAMBLE).toBe('string');
+    expect(HISTORY_PREAMBLE.length).toBeLessThanOrEqual(700);
+    expect(HISTORY_PREAMBLE).not.toContain('\n');
+    // key tokens: the tool-log line shapes, "already executed", the pi__ MCP
+    // tool prefix, the [user] marker of the last message to answer
+    expect(HISTORY_PREAMBLE).toContain('[tool');
+    expect(HISTORY_PREAMBLE).toContain('[tool result');
+    expect(HISTORY_PREAMBLE).toContain('already executed');
+    expect(HISTORY_PREAMBLE).toContain('pi__');
+    expect(HISTORY_PREAMBLE).toContain('[user]');
   });
 });

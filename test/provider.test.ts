@@ -28,6 +28,7 @@ import type { BridgeConfig } from '../src/config.ts';
 import { QUOTA_ERROR_PREFIX, AUTH_ERROR_HINT } from '../src/acp-client.ts';
 import { createMcpBridge, type CreateMcpBridgeOptions, type McpBridge } from '../src/mcp-bridge.ts';
 import { MistralProvider } from '../src/provider.ts';
+import { HISTORY_PREAMBLE, renderTranscript } from '../src/transcript.ts';
 import { PROMPT_RESPONSE_USAGE, TOOL_CALL_META_TOOL_NAME, VIBE_ENV } from '../src/vibe-protocol.ts';
 import {
   makeFakeSpawn,
@@ -117,6 +118,27 @@ function toolResult(toolCallId: string, toolName: string, text: string): ToolRes
     toolName,
     content: [{ type: 'text', text }],
     isError: false,
+    timestamp: ts,
+  };
+}
+
+/** A synthetic assistant message for the rebuild transcript (tests may use model literals, AGENTS.md §9). */
+function assistant(content: AssistantMessage['content']): AssistantMessage {
+  return {
+    role: 'assistant',
+    content,
+    api: MODEL.api,
+    provider: MODEL.provider,
+    model: MODEL.id,
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: 'toolUse',
     timestamp: ts,
   };
 }
@@ -340,6 +362,55 @@ describe('MistralProvider.streamSimple: text turn + delta reuse (ADR-0003)', () 
       expect(h.sessionNews()).toBe(1);
       expect(h.prompts()).toHaveLength(2);
       expect(h.prompts()[1].params.prompt[0].text).toBe('again');
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('rebuild prompt = system prompt + HISTORY_PREAMBLE + transcript (log framed as history); a delta turn carries no preamble', async () => {
+    const h = makeProvider({ promptScript: textTurnScript });
+    try {
+      // a history that already contains a tool call and its result, so the
+      // transcript has the `[tool pi__…]` / `[tool result …]` log lines that
+      // the model must not imitate as text
+      const messages: Message[] = [
+        user('hi'),
+        assistant([
+          { type: 'text', text: 'let me check' },
+          { type: 'toolCall', id: 'call-1', name: 'echo', arguments: { text: 'ping' } },
+        ]),
+        toolResult('call-1', 'echo', 'ping'),
+        user('what next'),
+      ];
+      const stream1 = h.provider.streamSimple(MODEL, contextOf(messages), { sessionId: 'pi-1' });
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('stop');
+      expect(h.prompts()).toHaveLength(1);
+      const text1 = h.prompts()[0].params.prompt[0].text as string;
+      // (a) the rebuild prompt carries the history preamble
+      expect(text1).toContain(HISTORY_PREAMBLE);
+      // (b) exactly after the system prompt and before the first [user] line
+      expect(text1).toBe(
+        `${SYSTEM_PROMPT}\n\n${HISTORY_PREAMBLE}\n\n${renderTranscript(messages)}`
+      );
+      expect(text1.indexOf(SYSTEM_PROMPT)).toBeLessThan(text1.indexOf(HISTORY_PREAMBLE));
+      expect(text1.indexOf(HISTORY_PREAMBLE)).toBeLessThan(text1.indexOf('[user]\n'));
+      // the transcript itself still contains the tool-call log lines
+      expect(text1).toContain('[tool pi__echo {"text":"ping"}]');
+      expect(text1).toContain('[tool result pi__echo call-1]');
+
+      // (c) a delta turn's prompt is only the new message — no preamble
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf([...messages, first.message, user('more')]),
+        { sessionId: 'pi-1' }
+      );
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.prompts()).toHaveLength(2);
+      const text2 = h.prompts()[1].params.prompt[0].text as string;
+      expect(text2).toBe('more');
+      expect(text2).not.toContain(HISTORY_PREAMBLE);
     } finally {
       await h.provider.dispose();
     }

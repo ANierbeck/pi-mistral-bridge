@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Rebuild prompts (ADR-0003) now carry a history preamble (`HISTORY_PREAMBLE`
+  in `src/transcript.ts`) between the system prompt and the rendered
+  transcript, so the model reads the transcript as a read-only log instead of
+  imitating the `[tool pi__…]` / `[tool result …]` lines as text. Found in a
+  real E2E run (P6 of the multi-step suite): after an abort-triggered rebuild
+  the model answered a tool request with the literal text
+  `[tool ask_vibe {…}]` instead of making a real tool call.
+
 ## 0.1.1 - 2026-11-25
 
 ### Changed
