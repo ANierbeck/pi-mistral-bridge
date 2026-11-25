@@ -10,7 +10,7 @@
  *   (ADR-0007); the alias for a Pi model id comes from the discovery map
  *   (api id → alias, ADR-0005).
  * - Turn flows per `decideFlow` (ADR-0003, src/session-map.ts):
- *   - `rebuild` → new ACP session, prompt = system prompt + renderTranscript;
+ *   - `rebuild` → new ACP session, prompt = system prompt + HISTORY_PREAMBLE + renderTranscript;
  *   - `delta` → same ACP session, prompt = renderDelta of the new messages;
  *   - `continueToolResults` → `mcpBridge.deliverResults` for the parked batch,
  *     keep consuming the SAME still-running ACP prompt.
@@ -77,7 +77,7 @@ import {
   type FlowDecision,
   type SessionState,
 } from './session-map.ts';
-import { renderDelta, renderTranscript } from './transcript.ts';
+import { HISTORY_PREAMBLE, renderDelta, renderTranscript } from './transcript.ts';
 import type { BridgeMcpServer } from './vibe-protocol.ts';
 
 /** Options of {@link MistralProvider}. */
@@ -503,7 +503,7 @@ export class MistralProvider {
     await this.startRebuild(args, bridge, pool);
   }
 
-  /** Rebuild flow: close the old ACP session, open a new one, prompt = system prompt + transcript. */
+  /** Rebuild flow: close the old ACP session, open a new one, prompt = system prompt + HISTORY_PREAMBLE + transcript. */
   private async startRebuild(
     args: {
       model: Model<Api>;
@@ -547,7 +547,12 @@ export class MistralProvider {
     state.modelAlias = modelAlias;
     state.systemPromptDigest = hashText(systemPrompt);
     const transcript = renderTranscript(context.messages);
-    const promptText = systemPrompt ? `${systemPrompt}\n\n${transcript}` : transcript;
+    // Frame the rebuilt history as a read-only log (HISTORY_PREAMBLE) so the
+    // model does not imitate the `[tool …]` log lines as text (real-run
+    // finding after an abort-triggered rebuild, ADR-0003).
+    const promptText = systemPrompt
+      ? `${systemPrompt}\n\n${HISTORY_PREAMBLE}\n\n${transcript}`
+      : `${HISTORY_PREAMBLE}\n\n${transcript}`;
     let prompt: AcpPrompt;
     try {
       prompt = session.prompt(promptText);

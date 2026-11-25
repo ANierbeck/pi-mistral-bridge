@@ -14,6 +14,7 @@ import type {
 import {
   DEFAULT_MAX_TOOL_RESULT_CHARS,
   HEAD_TRUNCATED_MARKER,
+  HISTORY_PREAMBLE,
   TRUNCATED_MARKER,
   digestMessages,
   renderDelta,
@@ -256,5 +257,28 @@ describe('digestMessages (stable sha256 over role + content, ADR-0003)', () => {
     expect(digestMessages([toolResult('c', 't', [{ type: 'text', text: 'x' }])])).not.toBe(
       digestMessages([toolResult('c', 't', [{ type: 'text', text: 'x' }], true)])
     );
+  });
+});
+
+describe('HISTORY_PREAMBLE (rebuild prompt framing, ADR-0003)', () => {
+  it('is one short English paragraph that frames the transcript as a read-only log of already executed tool calls and forbids writing tool calls as text', () => {
+    expect(typeof HISTORY_PREAMBLE).toBe('string');
+    expect(HISTORY_PREAMBLE.length).toBeLessThanOrEqual(700);
+    expect(HISTORY_PREAMBLE).not.toContain('\n');
+    // key tokens: the tool-log line shapes, "already executed", the pi__ MCP
+    // tool prefix, the [user] marker of the last message to answer
+    expect(HISTORY_PREAMBLE).toContain('[tool');
+    expect(HISTORY_PREAMBLE).toContain('[tool result');
+    expect(HISTORY_PREAMBLE).toContain('already executed');
+    expect(HISTORY_PREAMBLE).toContain('pi__');
+    expect(HISTORY_PREAMBLE).toContain('[user]');
+    // the actual instructions, not just tokens (Sourcery finding on PR #10):
+    // framing as history, no imitating, no writing tool calls as text,
+    // normal tool-calling interface, and unfinished calls must be completed
+    expect(HISTORY_PREAMBLE).toContain('read-only history');
+    expect(HISTORY_PREAMBLE).toContain('not a format to imitate');
+    expect(HISTORY_PREAMBLE).toMatch(/[Nn]ever write a tool call as text/);
+    expect(HISTORY_PREAMBLE).toMatch(/call it through the normal tool-calling interface/);
+    expect(HISTORY_PREAMBLE).toContain('logged without a result');
   });
 });
