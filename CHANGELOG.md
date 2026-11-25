@@ -4,10 +4,11 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 Semantic Versioning.
 
-## 0.1.1 - 2026-11-24
+## 0.1.1 - 2026-11-25
 
 ### Changed
 
+- License changed from MIT to **Apache-2.0** (0.1.0 on npm remains MIT).
 - npm package is published under the scoped name `@anierbeck/pi-mistral-bridge`
   (the account cannot create unscoped names); install with
   `pi install npm:@anierbeck/pi-mistral-bridge`. GitHub repository name unchanged.
@@ -24,6 +25,9 @@ Semantic Versioning.
 - The commit-range secret scan no longer flags the public npm scope
   `@anierbeck/` (explicit publication choice); a bare lowercase handle is
   still rejected.
+- Publish job runs on Node 24 (npm 11): npm Trusted Publishing (OIDC)
+  needs npm >= 11.5.1; on Node 22 (npm 10) the token exchange never
+  happened and the registry answered the unauthenticated PUT with 404.
 
 ## 0.1.0 - 2026-11-24
 
@@ -35,9 +39,7 @@ Semantic Versioning.
   eslint/prettier/vitest toolchain with coverage config, esbuild bundle to
   `dist/index.js`, pre-push secret scanning (`scripts/secret-scan.ts`,
   `scripts/forbidden-patterns.ts`, `.githooks/pre-push`), GitHub Actions CI
-  (`test`, `secret-scan`), MIT LICENSE. (Formerly logged under a dated
-  `0.1.0 — 2026-11-24` heading; 0.1.0 is not released — `prepublishOnly`
-  requires a git tag at HEAD.)
+  (`test`, `secret-scan`), MIT LICENSE.
 - **T1 — Scaffold:** pi package manifest, strict TypeScript config,
   eslint/prettier/vitest toolchain with coverage floors, esbuild bundle to
   `dist/index.js`, pre-push secret scanning (`scripts/secret-scan.ts`,
