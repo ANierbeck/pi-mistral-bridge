@@ -22,7 +22,7 @@
  *   {@link renderDelta} of them (ADR-0003).
  * - `rebuild` — anything else (no session yet, dirty after abort/crash/
  *   steering, model switch, changed system prompt, edited/compacted history):
- *   new ACP session, prompt = system prompt + transcript (ADR-0003).
+ *   new ACP session, prompt = system prompt + HISTORY_PREAMBLE + transcript (ADR-0003).
  */
 import { createHash } from 'node:crypto';
 import type { Message, ToolResultMessage } from '@earendil-works/pi-ai';

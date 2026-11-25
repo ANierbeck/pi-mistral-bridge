@@ -415,6 +415,39 @@ describe('MistralProvider.streamSimple: text turn + delta reuse (ADR-0003)', () 
       await h.provider.dispose();
     }
   });
+
+  it('rebuild with an EMPTY system prompt sends exactly HISTORY_PREAMBLE + transcript (preamble first, no leading blank lines)', async () => {
+    const h = makeProvider({ promptScript: textTurnScript });
+    try {
+      const messages: Message[] = [
+        user('hi'),
+        assistant([
+          { type: 'text', text: 'let me check' },
+          { type: 'toolCall', id: 'call-1', name: 'echo', arguments: { text: 'ping' } },
+        ]),
+        toolResult('call-1', 'echo', 'ping'),
+        user('what next'),
+      ];
+      // contextOf hard-codes SYSTEM_PROMPT; the provider reads the prompt via
+      // getCurrentSystemPrompt(context.messages), which is '' for an empty one
+      // (src/provider.ts ~553 takes the empty branch on a falsy prompt)
+      const stream1 = h.provider.streamSimple(
+        MODEL,
+        normalizeContext({ systemPrompt: '', messages, tools: TOOLS }),
+        { sessionId: 'pi-1' }
+      );
+      const first = await collectStream(stream1);
+      expect(first.message.stopReason).toBe('stop');
+      expect(h.prompts()).toHaveLength(1);
+      const text1 = h.prompts()[0].params.prompt[0].text as string;
+      // exactly the preamble + transcript: no system prompt, no leading "\n\n"
+      expect(text1).toBe(`${HISTORY_PREAMBLE}\n\n${renderTranscript(messages)}`);
+      expect(text1.startsWith(HISTORY_PREAMBLE)).toBe(true);
+      expect(text1).not.toContain(SYSTEM_PROMPT);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
 });
 
 describe('MistralProvider.streamSimple: tool turn (park/resume, ADR-0002)', () => {
