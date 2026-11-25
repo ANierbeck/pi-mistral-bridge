@@ -63,13 +63,13 @@ to Pi's builtin HTTP provider — **not** to this bridge. Use
 
 ## Install
 
-Once this package is published on npm:
+From npm:
 
 ```bash
 pi install npm:@anierbeck/pi-mistral-bridge
 ```
 
-Until then, from a local checkout:
+Or from a local checkout:
 
 ```bash
 npm ci

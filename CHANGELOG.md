@@ -39,9 +39,7 @@ Semantic Versioning.
   eslint/prettier/vitest toolchain with coverage config, esbuild bundle to
   `dist/index.js`, pre-push secret scanning (`scripts/secret-scan.ts`,
   `scripts/forbidden-patterns.ts`, `.githooks/pre-push`), GitHub Actions CI
-  (`test`, `secret-scan`), MIT LICENSE. (Formerly logged under a dated
-  `0.1.0 — 2026-11-24` heading; 0.1.0 is not released — `prepublishOnly`
-  requires a git tag at HEAD.)
+  (`test`, `secret-scan`), MIT LICENSE.
 - **T1 — Scaffold:** pi package manifest, strict TypeScript config,
   eslint/prettier/vitest toolchain with coverage floors, esbuild bundle to
   `dist/index.js`, pre-push secret scanning (`scripts/secret-scan.ts`,
