@@ -32,6 +32,12 @@ Semantic Versioning.
 
 ### Fixed
 
+- Rebuild prompts now frame the transcript as read-only history
+  (`HISTORY_PREAMBLE`, `src/transcript.ts`): in a real E2E run a model
+  answered a tool request with the literal text `[tool ask_vibe {…}]` after
+  an abort-triggered rebuild imitated the plain-text log; the preamble also
+  clarifies that a logged call without a result may not have run yet and
+  must be completed through the normal tool-calling interface.
 - `prepublishOnly` script contained an unescaped apostrophe that broke
   `sh -c` parsing on every publish attempt.
 - The commit-range secret scan no longer flags the public npm scope

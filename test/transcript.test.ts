@@ -272,5 +272,13 @@ describe('HISTORY_PREAMBLE (rebuild prompt framing, ADR-0003)', () => {
     expect(HISTORY_PREAMBLE).toContain('already executed');
     expect(HISTORY_PREAMBLE).toContain('pi__');
     expect(HISTORY_PREAMBLE).toContain('[user]');
+    // the actual instructions, not just tokens (Sourcery finding on PR #10):
+    // framing as history, no imitating, no writing tool calls as text,
+    // normal tool-calling interface, and unfinished calls must be completed
+    expect(HISTORY_PREAMBLE).toContain('read-only history');
+    expect(HISTORY_PREAMBLE).toContain('not a format to imitate');
+    expect(HISTORY_PREAMBLE).toMatch(/[Nn]ever write a tool call as text/);
+    expect(HISTORY_PREAMBLE).toMatch(/call it through the normal tool-calling interface/);
+    expect(HISTORY_PREAMBLE).toContain('logged without a result');
   });
 });

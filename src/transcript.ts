@@ -53,7 +53,7 @@ export const HEAD_TRUNCATED_MARKER = '[... earlier transcript truncated ...]';
  * model names (AGENTS.md §9).
  */
 export const HISTORY_PREAMBLE =
-  'The following is a plain-text log of the conversation so far, provided as read-only history for context. Lines like `[tool pi__<name> {...}]` and `[tool result ...]` are records of tool calls that were already executed, together with their results — they are history, not a format to imitate. Never write a tool call as text; when you need a tool, call it through the normal tool-calling interface (the tools of this Pi session are available to you as MCP tools with the `pi__` prefix). Respond to the last `[user]` message in the log.';
+  'The following is a plain-text log of the conversation so far, provided as read-only history for context (a call whose result is missing may not have run yet). Lines like `[tool pi__<name> {...}]` and `[tool result ...]` are records of tool calls that were already executed, together with their results — they are history, not a format to imitate. Never write a tool call as text; when you need a tool — also to complete a call that is logged without a result — call it through the normal tool-calling interface (the tools of this Pi session are available to you as MCP tools with the `pi__` prefix). Respond to the last `[user]` message in the log.';
 
 /**
  * Canonical JSON (recursively sorted object keys) so identical values hash
