@@ -270,3 +270,8 @@ Modelled on [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
 (npm: [pi-claude-bridge](https://www.npmjs.com/package/pi-claude-bridge)) by
 Eli Dickinson — the bridge-provider pattern (external agent as a Pi model
 provider) follows that project.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). Version 0.1.0
+was published under MIT; 0.1.1 and later are Apache-2.0.
