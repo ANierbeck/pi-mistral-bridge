@@ -873,6 +873,7 @@ export class MistralProvider {
       if (!turn.ended) {
         if (error.kind === 'aborted') {
           this.endAborted(turn.stream, state, turn.message, error.message);
+          turn.ended = true; // a later dispose() must not end (and rewrite) it again
         } else {
           turn.message.stopReason = 'error';
           turn.message.errorMessage = error.message; // quota prefix / auth hint (ADR-0002)
@@ -891,7 +892,10 @@ export class MistralProvider {
     const result = outcome as PromptResult;
     if (result.stopReason === 'cancelled') {
       state.dirty = true;
-      if (!turn.ended) this.endAborted(turn.stream, state, turn.message, 'prompt was cancelled');
+      if (!turn.ended) {
+        this.endAborted(turn.stream, state, turn.message, 'prompt was cancelled');
+        turn.ended = true; // a later dispose() must not end (and rewrite) it again
+      }
       return false;
     }
     if (!turn.ended) {

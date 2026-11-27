@@ -168,14 +168,17 @@ afterEach(async () => {
   for (const bridge of bridges.splice(0)) await bridge.close().catch(() => {});
 });
 
-function makeProvider(behavior: FakeBehavior = {}): ProviderHarness {
+function makeProvider(
+  behavior: FakeBehavior = {},
+  configOverrides: Partial<BridgeConfig> = {}
+): ProviderHarness {
   const fake = makeFakeSpawn(behavior);
   const anomalies: string[] = [];
   let bridge: McpBridge | null = null;
   let bridgeCount = 0;
   let client: Client | null = null;
   const provider = new MistralProvider({
-    config: CONFIG,
+    config: { ...CONFIG, ...configOverrides },
     cwd: CWD,
     aliasByApiId: ALIAS_BY_API_ID,
     spawnChild: fake.spawnChild,
@@ -660,6 +663,59 @@ describe('MistralProvider.streamSimple: divergence and abort rebuild (ADR-0003)'
       // the partial content streamed before the abort is preserved on the
       // aborted message, not replaced by a fresh empty one
       expect(message.content).toEqual([{ type: 'text', text: 'partial answer' }]);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('dispose() after a cancelled abort leaves the delivered message untouched (0.1.3 release review)', async () => {
+    const h = makeProvider({
+      promptScript: () =>
+        new Promise((resolve) => {
+          h.fake.behavior.onCancel = () => resolve({ stopReason: 'cancelled' });
+        }),
+    });
+    try {
+      const controller = new AbortController();
+      const stream = h.provider.streamSimple(MODEL, contextOf([user('long turn')]), {
+        sessionId: 'pi-1',
+        signal: controller.signal,
+      });
+      await waitFor(() => h.prompts().length === 1, 'prompt start');
+      controller.abort();
+      const { message } = await collectStream(stream);
+      const delivered = message.errorMessage;
+      expect(delivered).toBe('prompt was cancelled');
+
+      await h.provider.dispose();
+      expect(message.errorMessage).toBe(delivered);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('dispose() after an abort that ended via the watchdog failure path leaves the delivered message untouched (0.1.3 release review)', async () => {
+    const h = makeProvider(
+      {
+        promptScript: () => new Promise(() => {}), // the agent never answers session/cancel
+      },
+      { abortWatchdogMs: 50 }
+    );
+    try {
+      const controller = new AbortController();
+      const stream = h.provider.streamSimple(MODEL, contextOf([user('long turn')]), {
+        sessionId: 'pi-1',
+        signal: controller.signal,
+      });
+      await waitFor(() => h.prompts().length === 1, 'prompt start');
+      controller.abort();
+      const { message } = await collectStream(stream);
+      expect(message.stopReason).toBe('aborted');
+      const delivered = message.errorMessage;
+      expect(delivered).toContain('session/cancel did not resolve');
+
+      await h.provider.dispose();
+      expect(message.errorMessage).toBe(delivered);
     } finally {
       await h.provider.dispose();
     }

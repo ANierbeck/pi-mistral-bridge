@@ -1,6 +1,6 @@
 # Plan: Dead provider turns must report failure instead of ending like a normal stop
 
-**Status:** done — 2026-11-27 (released in 0.1.3)
+**Status:** done — 2026-11-27 (ships with 0.1.3)
 
 Sibling plan (first problem, split out per AGENTS.md §11): [`2026-11-27-rebuild-literal-tool-text.md`](2026-11-27-rebuild-literal-tool-text.md) — rebuild transcripts rendered tool calls in an imitable format. Evidence for both: [`docs/research/2026-11-27-rebuild-tool-call-imitation.md`](../research/2026-11-27-rebuild-tool-call-imitation.md).
 

@@ -18,12 +18,17 @@ Semantic Versioning.
   results, assistant text and thinking, tool-call identifiers and arguments)
   can no longer forge history records or `[user]` / `[assistant]` headers.
   Line-initial delimiter and header shapes are quoted, including variants
-  with Unicode whitespace and U+2028 / U+2029 line separators; truncation cuts
-  on a safe boundary, keeps surrogate pairs whole and honours the `maxChars`
-  bound.
+  with Unicode whitespace, any Unicode format character (`Cf`: zero-width
+  characters, bidi marks and isolates, soft hyphen, BOM) or invisible filler in
+  front, and U+2028 / U+2029 line separators; truncation cuts on a safe
+  boundary, keeps surrogate pairs whole, honours the `maxChars` bound and no
+  longer hangs on a non-finite `maxChars` (NaN falls back to the default).
 - An abort that lands during the corrective retry or while a prompt settles
   now ends the turn as aborted; the settled ACP usage is recorded on dead
   turns.
+- An aborted turn that ended through a cancelled prompt or the abort watchdog
+  is no longer re-ended by provider disposal, which had overwritten the
+  delivered message's `errorMessage`.
 
 ### Added
 
