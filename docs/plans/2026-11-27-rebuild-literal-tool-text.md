@@ -1,6 +1,6 @@
 # Plan: Rebuild turns must not die by tool-call imitation — and must report it when they do
 
-**Status:** approved — 2026-11-27 (owner go on option A, plus requirement C: the bridge must report failures)
+**Status:** in progress — 2026-11-27 (owner go on option A, plus requirement C: the bridge must report failures; T1–T3 committed, T4 review/PR underway)
 
 **Problem**
 
@@ -37,9 +37,9 @@ Three bridge-side changes (unit-tested against the in-process fake ACP agent; no
 
 ## Tasks (subagent-driven, red-first per AGENTS.md §4/§13)
 
-- [ ] T1 — (worker, red-first) Detector + transcript format: new tests in `test/transcript.test.ts` (rendered transcript contains no `[tool pi__` and uses the new record format; detector flags a dead response and ignores responses with real tool calls). Observed RED, then implement in `src/transcript.ts`, update `HISTORY_PREAMBLE`.
-- [ ] T2 — (worker, red-first) Provider recovery: tests against the fake ACP agent — dead response triggers exactly one corrective prompt, healthy retry continues the turn, session marked dirty; a second dead response ends the turn with `stopReason: error` and a `mistral-bridge:`-prefixed feedback block. Then implement in `src/provider.ts` (+ dirty marking via `src/session-map.ts`).
-- [ ] T3 — (worker) ADR-0010 Proposed: bridge failure feedback contract (cites ADR-0003/0006; content specified in the task brief).
-- [ ] T4 — (controller) Gates re-run, diff review, reviewer subagent, PR to `main`.
+- [x] T1 — (worker, red-first) Detector + transcript format: new tests in `test/transcript.test.ts` (rendered transcript contains no `[tool pi__` and uses the new record format; detector flags a dead response and ignores responses with real tool calls). Observed RED, then implement in `src/transcript.ts`, update `HISTORY_PREAMBLE`.
+- [x] T2 — (worker, red-first) Provider recovery: tests against the fake ACP agent — dead response triggers exactly one corrective prompt, healthy retry continues the turn, session marked dirty; a second dead response ends the turn with `stopReason: error` and a `mistral-bridge:`-prefixed feedback block. Then implement in `src/provider.ts` (+ dirty marking via `src/session-map.ts`).
+- [x] T3 — (worker) ADR-0010 Proposed: bridge failure feedback contract (cites ADR-0003/0006; content specified in the task brief).
+- [ ] T4 — (controller, in progress) Gates re-run, diff review, reviewer subagent, PR to `main`.
 
 Gate commands (each with `timeout 180`): `npx tsc --noEmit`; `npm run lint`; `npm run format:check`; `npx vitest run`; `npm run test:coverage`; `npm run build`; `npm run secret-scan`.
