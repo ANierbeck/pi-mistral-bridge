@@ -888,6 +888,12 @@ export class MistralProvider {
       return false;
     }
     if (!turn.ended) {
+      // a parked turn's delivered message is frozen: usage/stopReason are only
+      // written while the turn is still open. The usage is recorded before
+      // the dead-turn check (ADR-0010) so dead and dead-again endings keep the
+      // token accounting of the most recent ACP result: a corrective response
+      // overwrites the dead one, a second dead response leaves its own.
+      turn.message.usage = result.usage;
       // Dead turn (ADR-0010): the response imitated a tool call as plain text
       // and called nothing — recover once, then fail explicitly. Only blocks
       // added since the last settle are checked: the first dead response's
@@ -896,9 +902,6 @@ export class MistralProvider {
       const fresh = turn.message.content.slice(turn.checkedContentLength);
       turn.checkedContentLength = turn.message.content.length;
       if (findImitatedToolCallText(fresh)) return this.handleDeadTurn(live);
-      // a parked turn's delivered message is frozen: usage/stopReason are only
-      // written while the turn is still open
-      turn.message.usage = result.usage;
       const mapped = mapStopReason(result.stopReason);
       turn.message.stopReason = mapped.reason;
       if (mapped.rawStopReason !== undefined) turn.message.rawStopReason = mapped.rawStopReason;

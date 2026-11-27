@@ -1779,6 +1779,51 @@ describe('MistralProvider.streamSimple: dead-turn corrective retry (ADR-0010)', 
     }
   });
 
+  it('dead response twice: the error turn keeps the usage of the second dead result (ADR-0010)', async () => {
+    const h = makeProvider({
+      // both responses are dead and carry their usage only in the settled
+      // prompt response (no live usage_update): the second result's usage
+      // must be the one on the delivered error turn
+      promptScript: async (params, agent, fake) => {
+        await sendUpdate(agent, params.sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: DEAD_TEXT },
+        });
+        return {
+          stopReason: 'end_turn',
+          [PROMPT_RESPONSE_USAGE]: {
+            totalTokens: fake.promptCount === 1 ? 105 : 210,
+            inputTokens: 80,
+            outputTokens: 20,
+            cachedReadTokens: 5,
+          },
+        };
+      },
+    });
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi')]), { sessionId: 'pi-1' })
+      );
+
+      expect(first.message.stopReason).toBe('error');
+      // usage of the most recent ACP result (the second dead response) —
+      // never unset on a dead/dead-again turn
+      expect(first.message.usage).toEqual({
+        input: 80,
+        output: 20,
+        cacheRead: 5,
+        cacheWrite: 0,
+        totalTokens: 210,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      });
+      // exactly one corrective prompt, on the same ACP session
+      expect(h.prompts()).toHaveLength(2);
+      expect(h.sessionNews()).toBe(1);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
   it('dead response, then a healthy corrective response: turn ends stop; the dirty session rebuilds on the next call (ADR-0010 + ADR-0003)', async () => {
     const h = makeProvider({
       promptScript: async (params, agent, fake) => {
@@ -1811,6 +1856,70 @@ describe('MistralProvider.streamSimple: dead-turn corrective retry (ADR-0010)', 
       const rebuildPrompt = h.prompts()[2].params.prompt[0].text;
       expect(rebuildPrompt).toContain(HISTORY_PREAMBLE);
       expect(rebuildPrompt).toContain('[user]\nnext');
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('abort during the corrective response: aborted turn keeps the partial corrective content, session dirty, no third prompt (ADR-0010 + ADR-0003)', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount === 1) return deadTurnScript(params, agent, fake);
+        // the corrective response streams one chunk, then hangs until
+        // session/cancel settles it as cancelled
+        await sendUpdate(agent, params.sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'corrective partial' },
+        });
+        return new Promise((resolve) => {
+          h.fake.behavior.onCancel = () => resolve({ stopReason: 'cancelled' });
+        });
+      },
+    });
+    try {
+      const controller = new AbortController();
+      const stream = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+        signal: controller.signal,
+      });
+      const events: AssistantMessageEvent[] = [];
+      const done = (async () => {
+        for await (const event of stream) events.push(event);
+        return stream.result();
+      })();
+      await waitFor(() => h.prompts().length === 2, 'corrective prompt sent');
+      await waitFor(
+        () => events.some((e) => e.type === 'text_delta' && e.delta === 'corrective partial'),
+        'corrective partial delivered'
+      );
+      controller.abort();
+      const message = await done;
+
+      expect(message.stopReason).toBe('aborted');
+      expect(message.errorMessage).toBeTruthy();
+      // the dead text and the partial corrective content are both preserved
+      expect(message.content).toEqual([
+        { type: 'text', text: DEAD_TEXT },
+        { type: 'text', text: 'corrective partial' },
+      ]);
+      // no further corrective prompt: exactly the dead response and its one
+      // corrective retry were sent, on the same ACP session
+      expect(h.prompts()).toHaveLength(2);
+      expect(h.prompts()[1].params.prompt[0].text).toBe(CORRECTIVE_PROMPT);
+      expect(h.sessionNews()).toBe(1);
+      const cancels = h.fake.agents[0].recorded.filter((r) => r.method === 'session/cancel');
+      expect(cancels).toHaveLength(1);
+
+      // the abort marked the session dirty: the next call rebuilds
+      h.fake.behavior.promptScript = async () => ({ stopReason: 'end_turn' });
+      const second = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi'), user('again')]), {
+          sessionId: 'pi-1',
+        })
+      );
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.sessionNews()).toBe(2); // rebuilt on a NEW ACP session
+      expect(h.prompts()).toHaveLength(3);
     } finally {
       await h.provider.dispose();
     }
