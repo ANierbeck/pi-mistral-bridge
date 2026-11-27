@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 Semantic Versioning.
 
+## Unreleased
+
+### Added
+
+- Provider mode reports a Vibe rate limit to Pi through the `onResponse`
+  stream option: status `429` with empty headers, once per failed attempt and
+  before the terminal error event. No `retry-after` is sent because Vibe gives
+  no reset time. The error text is unchanged; a throwing, rejecting or hanging
+  callback never changes the stream's outcome.
+- Quota errors are classified by Vibe's ACP error code `-31001` first, so
+  rewording of the rate-limit message no longer hides them; the text match
+  stays as the fallback.
+
 ## 0.1.3 - 2026-11-27
 
 ### Fixed

@@ -244,7 +244,12 @@ to anything under Vibe's own directory.
   `vibe-acp --setup` hint on stderr: Vibe is probably not signed in. Run
   `vibe-acp --setup`, then `/reload` in Pi.
 - **Errors starting with `Mistral Vibe quota exceeded`**: Vibe surfaced a
-  quota/429 error from Mistral. Check your allowance in Vibe.
+  quota/429 or rate-limit error from Mistral (Vibe's ACP error code `-31001`
+  or a matching message). Check your allowance in Vibe. In provider mode the
+  bridge also reports the limit to Pi through the `onResponse` stream option
+  as status `429` with empty headers — no `retry-after`, because Vibe exposes
+  no reset time. A router that reads limits from the response then falls back
+  to its own backoff.
 - **Authentication errors** from the model: run `vibe-acp --setup` — the
   bridge never handles credentials itself.
 - **Config errors** name the file and key, e.g.

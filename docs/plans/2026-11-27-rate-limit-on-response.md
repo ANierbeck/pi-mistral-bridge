@@ -1,6 +1,6 @@
 # Report rate limits through Pi's `onResponse` stream option
 
-**Status:** approved — 2026-11-27 (owner chose "429 without retry-after").
+**Status:** done — 2026-11-27 (unreleased; owner chose "429 without retry-after").
 
 ## Problem
 
@@ -67,12 +67,12 @@ declined by the owner; if Vibe later exposes a reset time over ACP, sending
 
 ## Tasks
 
-- [ ] T1 Red-first tests, then `VIBE_RATE_LIMIT_ERROR_CODE` + code-based
+- [x] T1 Red-first tests, then `VIBE_RATE_LIMIT_ERROR_CODE` + code-based
   classification (fake ACP agent returns a JSON-RPC error with code `-31001`
   and wording that the regex does not match).
-- [ ] T2 Red-first tests, then the single `onResponse` helper wired into every
+- [x] T2 Red-first tests, then the single `onResponse` helper wired into every
   quota-ending path (spy called once with status 429, empty headers, the
   served model; throwing and rejecting spies do not change the outcome; no
   call for non-quota errors, success, abort; no call without a function).
-- [ ] T3 README (rate-limit behaviour, Vibe gives no reset time), CHANGELOG
+- [x] T3 README (rate-limit behaviour, Vibe gives no reset time), CHANGELOG
   `Unreleased`.
