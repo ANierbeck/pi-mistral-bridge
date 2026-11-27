@@ -74,6 +74,11 @@ ADR-0006 (provider-mode permissions and tool gating).
   records are history, never to be imitated.
 - A session that needed a corrective retry is rebuilt on the next turn
   (conservative, ADR-0003) — one extra rebuild in the rare failure case.
+- When the corrective response issues real tool calls, the turn ends at the
+  tool batch, before the corrective prompt settles; the delivered `toolUse`
+  message therefore keeps the usage of the dead response, and the corrective
+  response's usage is never added to it (a parked turn's delivered message
+  is frozen). Accepted: token accounting for that turn is understated.
 - Downstream tooling can react to the `mistral-bridge:` error (fail over,
   surface it to the user) instead of seeing a normal stop.
 - The prefix string and the detector semantics become part of the bridge's

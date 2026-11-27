@@ -143,6 +143,11 @@ interface LiveTurn {
   state: SessionState;
   session: AcpSession;
   prompt: AcpPrompt;
+  /**
+   * Set once the Pi abort signal of this turn fired (attachAbort): a dead turn
+   * that settles afterwards must not get the corrective retry (ADR-0010).
+   */
+  aborted: boolean;
   /** The streamSimple call currently receiving events. */
   current: TurnStream;
   /** The context messages of the current call (for recordSentPrefix). */
@@ -613,6 +618,7 @@ export class MistralProvider {
       state,
       session,
       prompt,
+      aborted: false,
       current: turnStream,
       contextMessages,
       pendingEvents: [],
@@ -653,6 +659,7 @@ export class MistralProvider {
   private attachAbort(live: LiveTurn, state: SessionState, signal: AbortSignal | undefined): void {
     if (!signal) return;
     const onAbort = (): void => {
+      live.aborted = true;
       state.dirty = true;
       live.session.markDirty();
       void live.session.cancel().catch(() => {
@@ -687,7 +694,19 @@ export class MistralProvider {
       // would not identify a stale loop.
       if (this.live.get(live.key) !== live) return;
       if (!this.finishTurn(live, model, outcome, failure)) return;
-      // Dead turn (ADR-0010): finishTurn asked for the one corrective prompt
+      // Dead turn (ADR-0010): finishTurn asked for the one corrective prompt —
+      // unless the turn was aborted meanwhile: then end it aborted, send nothing
+      if (live.aborted) {
+        const turn = live.current;
+        this.endAborted(
+          turn.stream,
+          live.state,
+          turn.message,
+          'aborted before the corrective retry'
+        );
+        turn.ended = true;
+        return;
+      }
       try {
         live.prompt = live.session.prompt(DEAD_TURN_CORRECTION_PROMPT);
       } catch (error) {
