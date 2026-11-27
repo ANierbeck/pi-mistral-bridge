@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 Semantic Versioning.
 
+## 0.1.3 - 2026-11-27
+
+### Fixed
+
+- Rebuild transcripts (ADR-0003) now render past tool calls and tool results
+  as delimited, non-imitable records (`--- past tool call pi__<name> ---` …)
+  instead of `[tool pi__…]` lines, and `HISTORY_PREAMBLE` describes the new
+  record format. After compaction or rebuild turns the model had imitated the
+  old line shape as plain text instead of making a real tool call, and the
+  session silently died.
+- Security hardening of the rebuild log: untrusted content (user text, tool
+  results, assistant text and thinking, tool-call identifiers and arguments)
+  can no longer forge history records or `[user]` / `[assistant]` headers.
+  Line-initial delimiter and header shapes are quoted, including variants
+  with Unicode whitespace and U+2028 / U+2029 line separators; truncation cuts
+  on a safe boundary, keeps surrogate pairs whole and honours the `maxChars`
+  bound.
+- An abort that lands during the corrective retry or while a prompt settles
+  now ends the turn as aborted; the settled ACP usage is recorded on dead
+  turns.
+
+### Added
+
+- Dead-turn recovery (ADR-0010): a response that contains tool-call-shaped
+  text and no real tool call gets exactly one corrective prompt in the same
+  ACP session. If that response is dead again, the turn ends with
+  `stopReason: error` and a text block starting with the stable prefix
+  `mistral-bridge:`, and the session is rebuilt on the next turn.
+
 ## 0.1.2 - 2026-11-25
 
 ### Fixed

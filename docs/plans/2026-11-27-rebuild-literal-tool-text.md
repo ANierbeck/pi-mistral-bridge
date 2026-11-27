@@ -1,6 +1,6 @@
 # Plan: Rebuild transcripts must not render tool calls in an imitable format
 
-**Status:** in progress — 2026-11-27 (owner go on option A; T1 and the PR #12 review hardening committed; review/PR tracked as T4 in the sibling plan)
+**Status:** done — 2026-11-27 (released in 0.1.3)
 
 Sibling plan (second problem, split out per AGENTS.md §11): [`2026-11-27-bridge-failure-feedback.md`](2026-11-27-bridge-failure-feedback.md) — dead turns end silently, no failure feedback (owner requirement C, ADR-0010).
 

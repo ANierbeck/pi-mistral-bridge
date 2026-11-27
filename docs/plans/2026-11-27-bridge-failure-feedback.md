@@ -1,6 +1,6 @@
 # Plan: Dead provider turns must report failure instead of ending like a normal stop
 
-**Status:** in progress — 2026-11-27 (owner requirement C; T2, T3 and the PR #12 review-fix round committed, T4 review/PR #12 open)
+**Status:** done — 2026-11-27 (released in 0.1.3)
 
 Sibling plan (first problem, split out per AGENTS.md §11): [`2026-11-27-rebuild-literal-tool-text.md`](2026-11-27-rebuild-literal-tool-text.md) — rebuild transcripts rendered tool calls in an imitable format. Evidence for both: [`docs/research/2026-11-27-rebuild-tool-call-imitation.md`](../research/2026-11-27-rebuild-tool-call-imitation.md).
 
@@ -34,6 +34,6 @@ Two bridge-side changes (unit-tested against the in-process fake ACP agent; no n
 - [x] T2 — (worker, red-first) Provider recovery: tests against the fake ACP agent — dead response triggers exactly one corrective prompt, healthy retry continues the turn, session marked dirty; a second dead response ends the turn with `stopReason: error` and a `mistral-bridge:`-prefixed feedback block. Then implement in `src/provider.ts` (+ dirty marking via `src/session-map.ts`) (`fee84e7`).
 - [x] T3 — (worker) ADR-0010 Proposed: bridge failure feedback contract (cites ADR-0003/0006; content specified in the task brief) (`3e0369e`, residual-imitated-text consequence `db98b1a`).
 - [x] Review-fix round — settled ACP usage recorded on dead turns, abort during the corrective retry pinned (`b8f1cd7`); PR #12 review (`c29e0fb`): a Pi abort before the corrective prompt ends the turn aborted and sends nothing, the corrective response's usage is pinned, and the rebuild after a corrective tool call is pinned.
-- [ ] T4 — (controller, in progress) Gates re-run, diff review, reviewer subagent, PR #12 to `main` with every review read and resolved (AGENTS.md §8).
+- [x] T4 — (controller) Gates re-run, diff review, reviewer subagent, PR #12 to `main` with every review read and resolved (AGENTS.md §8) (PR #12–#14 merged).
 
 Gate commands (each with `timeout 180`): `npx tsc --noEmit`; `npm run lint`; `npm run format:check`; `npx vitest run`; `npm run test:coverage`; `npm run build`; `npm run secret-scan`.
