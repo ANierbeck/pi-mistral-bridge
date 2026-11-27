@@ -21,6 +21,11 @@
  * - Prompt end maps to `stop` (end_turn) / `length` (max_tokens) / `aborted`
  *   (cancelled); failures end with an `error` event carrying the classified
  *   message (quota prefix / `vibe-acp --setup` hint from acp-client, ADR-0002).
+ * - Dead turn (ADR-0010): a response that imitates a tool call as plain text
+ *   and calls nothing gets exactly one fixed corrective prompt in the same
+ *   ACP session (the corrective response continues the same Pi message, the
+ *   session goes dirty); a second dead response ends with an `error` event
+ *   and a visible `mistral-bridge:` feedback text.
  * - Abort (`options.signal`) → `session/cancel` (watchdog inside acp-client),
  *   session marked dirty, `stopReason: "aborted"` → next call rebuilds.
  * - Usage comes from the ACP side incl. cacheRead; cost is forced to 0
@@ -77,7 +82,12 @@ import {
   type FlowDecision,
   type SessionState,
 } from './session-map.ts';
-import { HISTORY_PREAMBLE, renderDelta, renderTranscript } from './transcript.ts';
+import {
+  HISTORY_PREAMBLE,
+  findImitatedToolCallText,
+  renderDelta,
+  renderTranscript,
+} from './transcript.ts';
 import type { BridgeMcpServer } from './vibe-protocol.ts';
 
 /** Options of {@link MistralProvider}. */
@@ -121,6 +131,10 @@ interface TurnStream {
   openThinking: number | null;
   /** True once the terminal event was pushed (toolUse park or done/error). */
   ended: boolean;
+  /** True once the dead-turn corrective prompt (ADR-0010) was sent. */
+  correctiveSent: boolean;
+  /** Content length already checked for imitated tool-call text (ADR-0010). */
+  checkedContentLength: number;
 }
 
 /** The live ACP counterpart of one Pi session key. */
@@ -207,6 +221,22 @@ function mapStopReason(stopReason: acp.StopReason): {
       return { reason: 'stop', rawStopReason: stopReason === 'end_turn' ? undefined : stopReason };
   }
 }
+
+/**
+ * Fixed corrective prompt for a dead turn (ADR-0010): the model wrote tool
+ * calls as literal text instead of calling them. Verbatim by contract —
+ * stable, machine-matchable, carries no session content.
+ */
+const DEAD_TURN_CORRECTION_PROMPT =
+  'Your last reply contained tool calls written as plain text instead of real tool calls. Re-issue them now as real tool calls through the tool-calling interface.';
+
+/**
+ * Fixed failure feedback when the response after the corrective prompt is
+ * dead again (ADR-0010): end the turn as an explicit error instead of
+ * silently delivering a dead message.
+ */
+const DEAD_TURN_FAILURE_TEXT =
+  'mistral-bridge: the model wrote tool calls as plain text again after one corrective prompt; this turn ends as an error.';
 
 /**
  * The provider-mode runtime: session map + per-Pi-session bridge/pool +
@@ -614,6 +644,8 @@ export class MistralProvider {
       openText: null,
       openThinking: null,
       ended: false,
+      correctiveSent: false,
+      checkedContentLength: 0,
     };
   }
 
@@ -633,24 +665,38 @@ export class MistralProvider {
 
   // ------------------------------------------------------------ event pump
 
-  /** Consumes one ACP prompt to its end, routing events to the current stream. */
+  /**
+   * Consumes ACP prompts to their end, routing events to the current stream.
+   * A dead turn (ADR-0010) re-prompts the same ACP session exactly once.
+   */
   private async consumeLoop(live: LiveTurn, model: Model<Api>): Promise<void> {
-    const prompt = live.prompt;
-    let outcome: PromptResult | null = null;
-    let failure: unknown = null;
-    try {
-      for await (const event of prompt) this.handleAcpEvent(live, event, model);
-      outcome = await prompt.result();
-    } catch (error) {
-      failure = error;
+    for (;;) {
+      let outcome: PromptResult | null = null;
+      let failure: unknown = null;
+      try {
+        for await (const event of live.prompt) this.handleAcpEvent(live, event, model);
+        outcome = await live.prompt.result();
+      } catch (error) {
+        failure = error;
+      }
+      // A stale loop — its LiveTurn was replaced in the map by a newer turn
+      // (steering / model-switch rebuild) — must not finishTurn: it could null
+      // the new turn's pendingToolBatch or overwrite recordSentPrefix. The map
+      // identity is the guard; `live.prompt` may have been reassigned by the
+      // dead-turn corrective retry (ADR-0010) below, so comparing prompts
+      // would not identify a stale loop.
+      if (this.live.get(live.key) !== live) return;
+      if (!this.finishTurn(live, model, outcome, failure)) return;
+      // Dead turn (ADR-0010): finishTurn asked for the one corrective prompt
+      try {
+        live.prompt = live.session.prompt(DEAD_TURN_CORRECTION_PROMPT);
+      } catch (error) {
+        // sending the corrective prompt failed: end the turn like any prompt
+        // failure
+        this.finishTurn(live, model, null, error);
+        return;
+      }
     }
-    // A stale loop — its LiveTurn was replaced in the map by a newer turn
-    // (steering / model-switch rebuild) — must not finishTurn: it could null
-    // the new turn's pendingToolBatch or overwrite recordSentPrefix. The map
-    // identity is the guard; `live.prompt` is never reassigned on the same
-    // object, so comparing prompts would be dead code.
-    if (this.live.get(live.key) !== live) return;
-    this.finishTurn(live, model, outcome, failure);
   }
 
   private handleAcpEvent(live: LiveTurn, event: AcpSessionEvent, model: Model<Api>): void {
@@ -797,12 +843,17 @@ export class MistralProvider {
 
   // ------------------------------------------------------------ turn end
 
+  /**
+   * Maps a settled ACP prompt onto the Pi turn: usage/stopReason and the
+   * done event, or the failure path. Returns true only for a dead turn
+   * (ADR-0010) whose one corrective prompt has not been sent yet.
+   */
   private finishTurn(
     live: LiveTurn,
     model: Model<Api>,
     outcome: PromptResult | null,
     failure: unknown
-  ): void {
+  ): boolean {
     const turn = live.current;
     const state = live.state;
     this.closeText(live);
@@ -827,16 +878,24 @@ export class MistralProvider {
         // record what the ACP session has seen (incl. the emitted message)
         recordSentPrefix(state, [...live.contextMessages, turn.message]);
       }
-      return;
+      return false;
     }
 
     const result = outcome as PromptResult;
     if (result.stopReason === 'cancelled') {
       state.dirty = true;
       if (!turn.ended) this.endAborted(turn.stream, state, turn.message, 'prompt was cancelled');
-      return;
+      return false;
     }
     if (!turn.ended) {
+      // Dead turn (ADR-0010): the response imitated a tool call as plain text
+      // and called nothing — recover once, then fail explicitly. Only blocks
+      // added since the last settle are checked: the first dead response's
+      // text stays in the message after the corrective retry, and a healthy
+      // corrective response must not read as a second dead one.
+      const fresh = turn.message.content.slice(turn.checkedContentLength);
+      turn.checkedContentLength = turn.message.content.length;
+      if (findImitatedToolCallText(fresh)) return this.handleDeadTurn(live);
       // a parked turn's delivered message is frozen: usage/stopReason are only
       // written while the turn is still open
       turn.message.usage = result.usage;
@@ -848,6 +907,52 @@ export class MistralProvider {
       turn.ended = true;
     }
     recordSentPrefix(state, [...live.contextMessages, turn.message]);
+    return false;
+  }
+
+  /**
+   * A dead turn (ADR-0010): the response imitated a tool call as plain text
+   * and called nothing. The first dead response sends exactly one corrective
+   * prompt into the same ACP session — its response continues the same Pi
+   * stream — and marks the session dirty: the ACP side saw an exchange Pi's
+   * history does not represent, so the next turn rebuilds (ADR-0003). A
+   * second dead response gets no further prompt: the turn ends as an
+   * explicit error with visible feedback, mirroring finishTurn's failure
+   * path. Returns true when consumeLoop must send the corrective prompt.
+   */
+  private handleDeadTurn(live: LiveTurn): boolean {
+    const turn = live.current;
+    const state = live.state;
+    state.dirty = true;
+    live.session.markDirty();
+    if (turn.correctiveSent) {
+      // explicit failure feedback (ADR-0010): visible text block + error event
+      turn.message.content.push({ type: 'text', text: '' });
+      turn.openText = turn.message.content.length - 1;
+      this.emit(live, {
+        type: 'text_start',
+        contentIndex: turn.openText,
+        partial: turn.message,
+      });
+      const block = turn.message.content[turn.openText];
+      if (block?.type === 'text') block.text += DEAD_TURN_FAILURE_TEXT;
+      this.emit(live, {
+        type: 'text_delta',
+        contentIndex: turn.openText,
+        delta: DEAD_TURN_FAILURE_TEXT,
+        partial: turn.message,
+      });
+      this.closeText(live);
+      turn.message.stopReason = 'error';
+      turn.message.errorMessage = DEAD_TURN_FAILURE_TEXT;
+      turn.stream.push({ type: 'error', reason: 'error', error: turn.message });
+      turn.stream.end();
+      turn.ended = true;
+      recordSentPrefix(state, [...live.contextMessages, turn.message]);
+      return false;
+    }
+    turn.correctiveSent = true;
+    return true;
   }
 
   /**

@@ -1616,5 +1616,222 @@ describe('MistralProvider.streamSimple: review T5 #16 test gaps (ADR-0002/0003)'
   });
 });
 
+// --------------------------------------------- dead turns (ADR-0010)
+
+describe('MistralProvider.streamSimple: dead-turn corrective retry (ADR-0010)', () => {
+  /** Line-initial imitated tool call — the dead-turn shape (ADR-0010). */
+  const DEAD_TEXT = '[tool pi__echo {"text":"hi"}]';
+
+  /** The fixed corrective prompt, verbatim (ADR-0010 feedback contract). */
+  const CORRECTIVE_PROMPT =
+    'Your last reply contained tool calls written as plain text instead of real tool calls. Re-issue them now as real tool calls through the tool-calling interface.';
+
+  /** A prompt response that imitates a tool call as plain text and ends. */
+  const deadTurnScript: PromptScript = async (params, agent) => {
+    const sessionId = params.sessionId;
+    await sendUpdate(agent, sessionId, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: DEAD_TEXT },
+    });
+    await sendUpdate(agent, sessionId, {
+      sessionUpdate: 'usage_update',
+      used: 100,
+      size: 200_000,
+      cost: { amount: 0.001, currency: 'USD' },
+      _meta: {
+        promptTokens: 80,
+        completionTokens: 20,
+        cachedTokens: 5,
+        totalTokens: 105,
+        steps: 2,
+      },
+    });
+    return {
+      stopReason: 'end_turn',
+      [PROMPT_RESPONSE_USAGE]: {
+        totalTokens: 105,
+        inputTokens: 80,
+        outputTokens: 20,
+        cachedReadTokens: 5,
+      },
+    };
+  };
+
+  /** A healthy plain-text prompt response. */
+  const healthyTurnScript: PromptScript = async (params, agent) => {
+    const sessionId = params.sessionId;
+    await sendUpdate(agent, sessionId, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'recovered answer' },
+    });
+    return {
+      stopReason: 'end_turn',
+      [PROMPT_RESPONSE_USAGE]: {
+        totalTokens: 105,
+        inputTokens: 80,
+        outputTokens: 20,
+        cachedReadTokens: 5,
+      },
+    };
+  };
+
+  it('dead response: one fixed corrective prompt on the same ACP session; a corrective response with a real tool call ends the turn as toolUse', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount === 1) return deadTurnScript(params, agent, fake);
+        // corrective response: a real bridge tool call this time (parks the batch)
+        const sessionId = params.sessionId;
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'recovered' },
+        });
+        await sendToolCallUpdate(agent, sessionId, 'effect-1', { text: 'hi' });
+        const client = await h.mcpClient();
+        // parks until Pi delivers the toolResult; the rejection only fires on
+        // teardown (bridge close), after the assertions below
+        await client
+          .callTool({ name: 'pi__echo', arguments: { text: 'hi' } })
+          .catch(() => undefined);
+        return {
+          stopReason: 'end_turn',
+          [PROMPT_RESPONSE_USAGE]: {
+            totalTokens: 105,
+            inputTokens: 80,
+            outputTokens: 20,
+            cachedReadTokens: 5,
+          },
+        };
+      },
+    });
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi')]), { sessionId: 'pi-1' })
+      );
+
+      // the corrective response continues the SAME turn message
+      expect(first.types).toEqual([
+        'start',
+        'text_start',
+        'text_delta',
+        'text_end',
+        'text_start',
+        'text_delta',
+        'text_end',
+        'toolcall_start',
+        'toolcall_end',
+        'done',
+      ]);
+      expect(first.message.stopReason).toBe('toolUse');
+      // delivered message: the dead text, then the corrected REAL tool call
+      expect(first.message.content[0]).toEqual({ type: 'text', text: DEAD_TEXT });
+      const toolCalls = first.message.content.filter((b) => b.type === 'toolCall');
+      expect(toolCalls).toHaveLength(1);
+      const call = toolCalls[0];
+      if (call.type !== 'toolCall') throw new Error('unreachable');
+      expect(call.name).toBe('echo');
+      expect(call.arguments).toEqual({ text: 'hi' });
+
+      // exactly one corrective prompt, verbatim, on the SAME ACP session
+      expect(h.sessionNews()).toBe(1);
+      expect(h.prompts()).toHaveLength(2);
+      expect(h.prompts()[1].params.prompt).toHaveLength(1);
+      expect(h.prompts()[1].params.prompt[0].type).toBe('text');
+      expect(h.prompts()[1].params.prompt[0].text).toBe(CORRECTIVE_PROMPT);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('dead response twice: exactly one corrective prompt, then an explicit error turn (ADR-0010)', async () => {
+    const h = makeProvider({ promptScript: deadTurnScript });
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi')]), { sessionId: 'pi-1' })
+      );
+
+      expect(first.types).toEqual([
+        'start',
+        'text_start',
+        'text_delta',
+        'text_end',
+        'text_start',
+        'text_delta',
+        'text_end',
+        'text_start',
+        'text_delta',
+        'text_end',
+        'error',
+      ]);
+      expect(first.message.stopReason).toBe('error');
+      expect(first.message.errorMessage).toBeTruthy();
+      // the failure feedback is a visible text block (ADR-0010)
+      const feedback = first.message.content[first.message.content.length - 1];
+      expect(feedback?.type).toBe('text');
+      if (feedback?.type === 'text') expect(feedback.text.startsWith('mistral-bridge:')).toBe(true);
+      // the dead text of both responses is preserved before the feedback
+      expect(first.message.content).toHaveLength(3);
+      // exactly ONE corrective prompt was sent
+      expect(h.prompts()).toHaveLength(2);
+      expect(h.prompts()[1].params.prompt[0].text).toBe(CORRECTIVE_PROMPT);
+      expect(h.sessionNews()).toBe(1);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('dead response, then a healthy corrective response: turn ends stop; the dirty session rebuilds on the next call (ADR-0010 + ADR-0003)', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount === 1) return deadTurnScript(params, agent, fake);
+        return healthyTurnScript(params, agent, fake);
+      },
+    });
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi')]), { sessionId: 'pi-1' })
+      );
+      expect(first.message.stopReason).toBe('stop');
+      expect(first.message.content).toEqual([
+        { type: 'text', text: DEAD_TEXT },
+        { type: 'text', text: 'recovered answer' },
+      ]);
+      expect(h.prompts()).toHaveLength(2);
+      expect(h.prompts()[1].params.prompt[0].text).toBe(CORRECTIVE_PROMPT);
+
+      // the corrective exchange marked the session dirty: the next call
+      // REBUILDS (new ACP session, full transcript) instead of a delta
+      const second = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi'), first.message, user('next')]), {
+          sessionId: 'pi-1',
+        })
+      );
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.sessionNews()).toBe(2); // rebuilt on a NEW ACP session
+      expect(h.prompts()).toHaveLength(3);
+      const rebuildPrompt = h.prompts()[2].params.prompt[0].text;
+      expect(rebuildPrompt).toContain(HISTORY_PREAMBLE);
+      expect(rebuildPrompt).toContain('[user]\nnext');
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('healthy response: no corrective prompt, unchanged stop turn', async () => {
+    const h = makeProvider({ promptScript: textTurnScript });
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi')]), { sessionId: 'pi-1' })
+      );
+      expect(first.message.stopReason).toBe('stop');
+      expect(h.prompts()).toHaveLength(1);
+      expect(h.prompts()[0].params.prompt[0].text).not.toContain(
+        'plain text instead of real tool calls'
+      );
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+});
+
 // keep the import used for the stream type in helpers
 void createAssistantMessageEventStream;
