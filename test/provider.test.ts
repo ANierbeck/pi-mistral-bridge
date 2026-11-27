@@ -371,8 +371,8 @@ describe('MistralProvider.streamSimple: text turn + delta reuse (ADR-0003)', () 
     const h = makeProvider({ promptScript: textTurnScript });
     try {
       // a history that already contains a tool call and its result, so the
-      // transcript has the `[tool pi__…]` / `[tool result …]` log lines that
-      // the model must not imitate as text
+      // transcript has the past tool-call / tool-result records that the
+      // model must not imitate as text (ADR-0010)
       const messages: Message[] = [
         user('hi'),
         assistant([
@@ -395,9 +395,16 @@ describe('MistralProvider.streamSimple: text turn + delta reuse (ADR-0003)', () 
       );
       expect(text1.indexOf(SYSTEM_PROMPT)).toBeLessThan(text1.indexOf(HISTORY_PREAMBLE));
       expect(text1.indexOf(HISTORY_PREAMBLE)).toBeLessThan(text1.indexOf('[user]\n'));
-      // the transcript itself still contains the tool-call log lines
-      expect(text1).toContain('[tool pi__echo {"text":"ping"}]');
-      expect(text1).toContain('[tool result pi__echo call-1]');
+      // the transcript itself carries the delimited past-tool records — and
+      // never the old `[tool pi__…]` shape the model imitated as text in a
+      // real run (ADR-0010)
+      expect(text1).toContain(
+        '--- past tool call pi__echo ---\n{"text":"ping"}\n--- end past tool call ---'
+      );
+      expect(text1).toContain(
+        '--- past tool result pi__echo (call-1) ---\nping\n--- end past tool result ---'
+      );
+      expect(text1).not.toContain('[tool pi__');
 
       // (c) a delta turn's prompt is only the new message — no preamble
       const stream2 = h.provider.streamSimple(

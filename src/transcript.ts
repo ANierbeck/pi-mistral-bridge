@@ -10,15 +10,20 @@
  * - {@link renderTranscript} renders a Pi message list as one compact
  *   plain-text prompt body for a REBUILD. The system prompt is NOT included
  *   here (the provider prepends it and {@link HISTORY_PREAMBLE} separately);
- *   user/assistant text is kept
- *   in full, tool calls render as `[tool pi__<name> <args>]`, tool results
- *   are truncated with a marker, images as `[image]`.
+ *   user/assistant text is kept in full; tool calls and tool results
+ *   render as delimited past-tool records (`--- past tool call … ---` /
+ *   `--- past tool result … ---`, results truncated with a marker) — a
+ *   record shape that must not be imitated as text (ADR-0010); images as
+ *   `[image]`.
  * - {@link renderDelta} renders only the newly appended message(s) as the
  *   next prompt of a DELTA turn (text and image blocks, ADR-0003).
  * - {@link digestMessages} is a stable sha256 over a canonical serialization
  *   of role + content; timestamps, usage and ids that Pi may regenerate are
  *   ignored, so the same logical history always digests identically.
  *
+ * - {@link findImitatedToolCallText} detects a dead turn (ADR-0010): a
+ *   response whose text imitates a tool call while it contains no real
+ *   toolCall block.
  * - {@link canonicalJson} is the canonical JSON (sorted keys) shared with the
  *   MCP bridge's de-dup hashing (ADR-0006): identical values serialize
  *   identically regardless of key order.
@@ -47,13 +52,14 @@ export const HEAD_TRUNCATED_MARKER = '[... earlier transcript truncated ...]';
 /**
  * Framing text the provider puts between the system prompt and a REBUILD
  * transcript (src/provider.ts). A bare transcript log made a model imitate
- * its `[tool …]` lines as text in a real run (it answered a tool request with
+ * its tool-call lines as text in a real run (it answered a tool request with
  * the literal `[tool ask_vibe {…}]` after an abort-triggered rebuild), so the
- * log is explicitly framed as read-only history. One short paragraph, no
- * model names (AGENTS.md §9).
+ * log is framed as read-only history and its tool records use delimited
+ * past-tool-call / past-tool-result sections that do not look like live tool
+ * syntax (ADR-0010). One short paragraph, no model names (AGENTS.md §9).
  */
 export const HISTORY_PREAMBLE =
-  'The following is a plain-text log of the conversation so far, provided as read-only history for context (a call whose result is missing may not have run yet). Lines like `[tool pi__<name> {...}]` and `[tool result ...]` are records of tool calls that were already executed, together with their results — they are history, not a format to imitate. Never write a tool call as text; when you need a tool — also to complete a call that is logged without a result — call it through the normal tool-calling interface (the tools of this Pi session are available to you as MCP tools with the `pi__` prefix). Respond to the last `[user]` message in the log.';
+  "The following is a plain-text log of the conversation, provided as read-only history for context (a call whose result is missing may not have run yet). Sections like `--- past tool call pi__<name> ---` … `--- end past tool call ---` and `--- past tool result pi__<name> (<id>) ---` … `--- end past tool result ---` are records of already executed tool calls — they are history, not a format to imitate. Never write a tool call as text; when you need a tool — also to complete a call that is logged without a result — call it through the normal tool-calling interface (this Pi session's tools are available as MCP tools with the `pi__` prefix). Respond to the last `[user]` message in the log.";
 
 /**
  * Canonical JSON (recursively sorted object keys) so identical values hash
@@ -95,15 +101,23 @@ function renderAssistant(message: AssistantMessage): string {
     .map((block) => {
       if (block.type === 'text') return block.text;
       if (block.type === 'thinking') return block.thinking;
-      // tool call: the Pi tool name as the bridge publishes it to Vibe
-      return `[tool ${PI_TOOL_PREFIX}${block.name} ${canonicalJson(block.arguments)}]`;
+      // tool call: a delimited record of a call that already ran (the Pi
+      // tool name as the bridge publishes it to Vibe); the old `[tool …]`
+      // line shape was imitated as text by the model in a real run (ADR-0010)
+      return [
+        `--- past tool call ${PI_TOOL_PREFIX}${block.name} ---`,
+        canonicalJson(block.arguments),
+        '--- end past tool call ---',
+      ].join('\n');
     })
     .join('\n');
 }
 
 function renderToolResult(message: ToolResultMessage, maxToolResultChars: number): string {
-  const head = `[tool result ${PI_TOOL_PREFIX}${message.toolName} ${message.toolCallId}]`;
-  return `${head}\n${truncate(renderContent(message.content), maxToolResultChars)}`;
+  // a delimited record, mirroring the past-tool-call sections (ADR-0010):
+  // the head names the tool and call id, the body the (truncated) result
+  const head = `--- past tool result ${PI_TOOL_PREFIX}${message.toolName} (${message.toolCallId}) ---`;
+  return `${head}\n${truncate(renderContent(message.content), maxToolResultChars)}\n--- end past tool result ---`;
 }
 
 /**
@@ -167,6 +181,25 @@ export function renderDelta(newMessages: readonly Message[]): string | acp.Conte
     }
   }
   return allPlainUserText ? texts.join('\n\n') : blocks;
+}
+
+// ----------------------------------------------------------------- detection
+
+/** Line-initial `[tool <name> {` text — the shape of an imitated tool call. */
+const IMITATED_TOOL_CALL_TEXT_PATTERN = /^[ \t]*\[tool [A-Za-z0-9_.-]+ \{/m;
+
+/**
+ * Detects a dead turn (ADR-0010): the response contains no real `toolCall`
+ * block, but its text starts a line with tool-call-shaped text
+ * (`[tool <name> {…}]`) — the model wrote a tool call as literal text
+ * instead of calling it. A response with at least one real toolCall block
+ * is never dead: tool-call-shaped text can then be quoted text.
+ */
+export function findImitatedToolCallText(content: AssistantMessage['content']): boolean {
+  if (content.some((block) => block.type === 'toolCall')) return false;
+  return content.some(
+    (block) => block.type === 'text' && IMITATED_TOOL_CALL_TEXT_PATTERN.test(block.text)
+  );
 }
 
 // -------------------------------------------------------------------- digest

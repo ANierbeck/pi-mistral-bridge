@@ -548,8 +548,9 @@ export class MistralProvider {
     state.systemPromptDigest = hashText(systemPrompt);
     const transcript = renderTranscript(context.messages);
     // Frame the rebuilt history as a read-only log (HISTORY_PREAMBLE) so the
-    // model does not imitate the `[tool …]` log lines as text (real-run
-    // finding after an abort-triggered rebuild, ADR-0003).
+    // model does not imitate the past-tool-call records as text (real-run
+    // finding after an abort-triggered rebuild, ADR-0003; record shape and
+    // detection per ADR-0010).
     const promptText = systemPrompt
       ? `${systemPrompt}\n\n${HISTORY_PREAMBLE}\n\n${transcript}`
       : `${HISTORY_PREAMBLE}\n\n${transcript}`;

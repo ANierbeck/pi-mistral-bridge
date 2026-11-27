@@ -1,15 +1,18 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`renderTranscript (rebuild prompt body, ADR-0003) > renders user/assistant text, tool calls as [tool pi__name args], images as [image]; system messages are excluded 1`] = `
+exports[`renderTranscript (rebuild prompt body, ADR-0003) > renders user/assistant text, tool calls as delimited past-tool-call records, images as [image]; system messages are excluded; never the imitable [tool pi__ shape 1`] = `
 "[user]
 hello there
 
 [assistant]
 Hi! Let me check.
-[tool pi__read {"path":"/tmp/x"}]
+--- past tool call pi__read ---
+{"path":"/tmp/x"}
+--- end past tool call ---
 
-[tool result pi__read call-1]
+--- past tool result pi__read (call-1) ---
 file contents here
+--- end past tool result ---
 
 [user]
 and an image:
