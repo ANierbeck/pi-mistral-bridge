@@ -67,6 +67,11 @@ ADR-0006 (provider-mode permissions and tool gating).
 
 - False positives cost one corrective model turn (e.g. an analysis reply
   that quotes the tool-call syntax without intending a call); accepted.
+- The imitated text of a dead response stays verbatim in the delivered Pi
+  message and hence in the session history; a later rebuild may re-present
+  it as plain text. Accepted: the per-settle detection window keeps it from
+  re-triggering recovery, and the rebuild preamble teaches that transcript
+  records are history, never to be imitated.
 - A session that needed a corrective retry is rebuilt on the next turn
   (conservative, ADR-0003) — one extra rebuild in the rare failure case.
 - Downstream tooling can react to the `mistral-bridge:` error (fail over,
