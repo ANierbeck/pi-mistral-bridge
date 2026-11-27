@@ -96,17 +96,27 @@ function truncate(text: string, maxChars: number): string {
  * (`[user]`, `[assistant]`).
  */
 const HISTORY_MARKER_LINE =
-  /^([ \t]*(?:--- (?:end )?past tool (?:call|result)\b|\[(?:user|assistant)\]))/gm;
+  /^([ \t\v\f\u00a0\ufeff]*(?:--- (?:end )?past tool (?:call|result)\b|\[(?:user|assistant)\]))/gm;
 
 /**
  * Untrusted content (user text, tool-result bodies, assistant text and
  * thinking) must not forge the bridge-generated history structure: a line
  * that starts like a record delimiter or a role header is quoted with `> `,
  * so only the bridge's own records and `[user]` / `[assistant]` headers sit at
- * a line start. Content without such lines is returned unchanged.
+ * a line start. Leading blanks include NBSP, BOM, vertical tab and form feed.
+ * Content without such lines is returned unchanged.
  */
 function neutralizeHistoryMarkers(text: string): string {
   return text.replace(HISTORY_MARKER_LINE, '> $1');
+}
+
+/**
+ * A record identifier (tool name, tool call id) as one line: any whitespace
+ * run, newlines included, collapses to a single space, so the identifier
+ * cannot break the record head or start a line of its own.
+ */
+function singleLine(identifier: string): string {
+  return identifier.replace(/\s+/g, ' ');
 }
 
 /** User/tool-result content as text: text blocks verbatim, images as `[image]`; forged record delimiters and role headers quoted. */
@@ -136,7 +146,7 @@ function renderAssistant(message: AssistantMessage): string {
       // tool name as the bridge publishes it to Vibe); the old `[tool …]`
       // line shape was imitated as text by the model in a real run (ADR-0010)
       return [
-        `--- past tool call ${PI_TOOL_PREFIX}${block.name} ---`,
+        `--- past tool call ${PI_TOOL_PREFIX}${singleLine(block.name)} ---`,
         escapeLineSeparators(canonicalJson(block.arguments)),
         '--- end past tool call ---',
       ].join('\n');
@@ -147,7 +157,7 @@ function renderAssistant(message: AssistantMessage): string {
 function renderToolResult(message: ToolResultMessage, maxToolResultChars: number): string {
   // a delimited record, mirroring the past-tool-call sections (ADR-0010):
   // the head names the tool and call id, the body the (truncated) result
-  const head = `--- past tool result ${PI_TOOL_PREFIX}${message.toolName} (${message.toolCallId}) ---`;
+  const head = `--- past tool result ${PI_TOOL_PREFIX}${singleLine(message.toolName)} (${singleLine(message.toolCallId)}) ---`;
   return `${head}\n${truncate(renderContent(message.content), maxToolResultChars)}\n--- end past tool result ---`;
 }
 
@@ -175,14 +185,22 @@ export function renderTranscript(
   if (text.length <= maxChars) return text;
   const marker = `${HEAD_TRUNCATED_MARKER}\n\n`;
   const keep = Math.max(0, maxChars - marker.length);
-  // the cut must land on a line start of the ORIGINAL text, else it can slice
-  // into a quoted forged header (`> [user]` -> `[user]`) and restore it
-  let cut = text.length - keep;
-  if (cut > 0 && cut < text.length && text[cut - 1] !== '\n') {
-    const nextLine = text.indexOf('\n', cut);
-    cut = nextLine === -1 ? text.length : nextLine + 1;
+  const cut = text.length - keep;
+  if (keep === 0) return marker;
+  // A cut inside a line keeps that line's tail (a single very long line, e.g.
+  // a pasted blob, must not lose the part holding the request). The kept
+  // fragment now starts a line of the rendered output, so it is neutralized:
+  // a cut inside a quoted forged header (`> [user]` -> `[user]`) must not
+  // restore it. The bridge's own later headers are left untouched. Quoting
+  // adds two characters at most: leading characters are dropped until the
+  // result fits maxChars again.
+  for (let start = cut; ; start += 1) {
+    if (start >= text.length || text[start - 1] === '\n') return marker + text.slice(start);
+    const lineEnd = text.indexOf('\n', start);
+    const fragmentEnd = lineEnd === -1 ? text.length : lineEnd;
+    const kept = neutralizeHistoryMarkers(text.slice(start, fragmentEnd)) + text.slice(fragmentEnd);
+    if (marker.length + kept.length <= maxChars) return marker + kept;
   }
-  return marker + text.slice(cut);
 }
 
 /**

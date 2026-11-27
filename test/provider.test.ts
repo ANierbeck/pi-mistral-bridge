@@ -1925,6 +1925,60 @@ describe('MistralProvider.streamSimple: dead-turn corrective retry (ADR-0010)', 
     }
   });
 
+  it('abort during the corrective response that still settles dead: the turn ends aborted, not with the mistral-bridge failure (ADR-0010)', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount === 1) return deadTurnScript(params, agent, fake);
+        // the corrective response is dead again, but only settles after the
+        // abort: the agent ignores session/cancel and answers end_turn
+        await sendUpdate(agent, params.sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: DEAD_TEXT },
+        });
+        await new Promise<void>((resolve) => {
+          h.fake.behavior.onCancel = () => resolve();
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const controller = new AbortController();
+      const stream = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+        signal: controller.signal,
+      });
+      const events: AssistantMessageEvent[] = [];
+      const done = (async () => {
+        for await (const event of stream) events.push(event);
+        return stream.result();
+      })();
+      await waitFor(() => h.prompts().length === 2, 'corrective prompt sent');
+      await waitFor(
+        () => events.filter((e) => e.type === 'text_delta' && e.delta === DEAD_TEXT).length === 2,
+        'second dead text delivered'
+      );
+      controller.abort();
+      const message = await done;
+
+      expect(message.stopReason).toBe('aborted');
+      expect(events.at(-1)).toMatchObject({ type: 'error', reason: 'aborted' });
+      expect(message.errorMessage ?? '').not.toContain('mistral-bridge:');
+      expect(JSON.stringify(message.content)).not.toContain('mistral-bridge:');
+      // no third prompt; the abort left the session dirty: the next call rebuilds
+      expect(h.prompts()).toHaveLength(2);
+      h.fake.behavior.promptScript = async () => ({ stopReason: 'end_turn' });
+      const second = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi'), user('again')]), {
+          sessionId: 'pi-1',
+        })
+      );
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.sessionNews()).toBe(2);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
   it('abort that lands while the dead response settles: no corrective prompt, the turn ends aborted, the session is dirty (ADR-0010 + ADR-0003)', async () => {
     const h = makeProvider({
       promptScript: async (params, agent, fake) => {

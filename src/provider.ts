@@ -694,19 +694,7 @@ export class MistralProvider {
       // would not identify a stale loop.
       if (this.live.get(live.key) !== live) return;
       if (!this.finishTurn(live, model, outcome, failure)) return;
-      // Dead turn (ADR-0010): finishTurn asked for the one corrective prompt —
-      // unless the turn was aborted meanwhile: then end it aborted, send nothing
-      if (live.aborted) {
-        const turn = live.current;
-        this.endAborted(
-          turn.stream,
-          live.state,
-          turn.message,
-          'aborted before the corrective retry'
-        );
-        turn.ended = true;
-        return;
-      }
+      // Dead turn (ADR-0010): finishTurn asked for the one corrective prompt
       try {
         live.prompt = live.session.prompt(DEAD_TURN_CORRECTION_PROMPT);
       } catch (error) {
@@ -920,7 +908,17 @@ export class MistralProvider {
       // corrective response must not read as a second dead one.
       const fresh = turn.message.content.slice(turn.checkedContentLength);
       turn.checkedContentLength = turn.message.content.length;
-      if (findImitatedToolCallText(fresh)) return this.handleDeadTurn(live);
+      if (findImitatedToolCallText(fresh)) {
+        // aborted meanwhile (before the first or during the corrective
+        // response): end the turn aborted — no corrective prompt, no failure
+        // text; the abort contract wins over the dead-turn feedback
+        if (live.aborted) {
+          this.endAborted(turn.stream, state, turn.message, 'aborted before the corrective retry');
+          turn.ended = true;
+          return false;
+        }
+        return this.handleDeadTurn(live);
+      }
       const mapped = mapStopReason(result.stopReason);
       turn.message.stopReason = mapped.reason;
       if (mapped.rawStopReason !== undefined) turn.message.rawStopReason = mapped.rawStopReason;
