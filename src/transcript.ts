@@ -117,6 +117,16 @@ function renderContent(content: string | (TextContent | ImageContent)[]): string
     .join('\n');
 }
 
+/**
+ * `JSON.stringify` leaves U+2028 / U+2029 literal, and `^` in the multiline
+ * history-marker regex matches after them, so a forged header inside a tool
+ * argument string could start a line. Escape them as JSON `\u2028` /
+ * `\u2029` (the record stays valid JSON); text without them is unchanged.
+ */
+function escapeLineSeparators(json: string): string {
+  return json.replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
 function renderAssistant(message: AssistantMessage): string {
   return message.content
     .map((block) => {
@@ -127,7 +137,7 @@ function renderAssistant(message: AssistantMessage): string {
       // line shape was imitated as text by the model in a real run (ADR-0010)
       return [
         `--- past tool call ${PI_TOOL_PREFIX}${block.name} ---`,
-        canonicalJson(block.arguments),
+        escapeLineSeparators(canonicalJson(block.arguments)),
         '--- end past tool call ---',
       ].join('\n');
     })
@@ -165,7 +175,14 @@ export function renderTranscript(
   if (text.length <= maxChars) return text;
   const marker = `${HEAD_TRUNCATED_MARKER}\n\n`;
   const keep = Math.max(0, maxChars - marker.length);
-  return marker + text.slice(text.length - keep);
+  // the cut must land on a line start of the ORIGINAL text, else it can slice
+  // into a quoted forged header (`> [user]` -> `[user]`) and restore it
+  let cut = text.length - keep;
+  if (cut > 0 && cut < text.length && text[cut - 1] !== '\n') {
+    const nextLine = text.indexOf('\n', cut);
+    cut = nextLine === -1 ? text.length : nextLine + 1;
+  }
+  return marker + text.slice(cut);
 }
 
 /**
