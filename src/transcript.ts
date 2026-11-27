@@ -87,7 +87,17 @@ export interface RenderTranscriptOptions {
 
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}${TRUNCATED_MARKER}`;
+  return `${keepWholePairsEnd(text.slice(0, maxChars))}${TRUNCATED_MARKER}`;
+}
+
+const isHighSurrogate = (unit: number): boolean => unit >= 0xd800 && unit <= 0xdbff;
+const isLowSurrogate = (unit: number): boolean => unit >= 0xdc00 && unit <= 0xdfff;
+
+/** Drops a trailing high surrogate: a tail cut must not leave half of a pair. */
+function keepWholePairsEnd(text: string): string {
+  return text.length > 0 && isHighSurrogate(text.charCodeAt(text.length - 1))
+    ? text.slice(0, -1)
+    : text;
 }
 
 /**
@@ -96,14 +106,16 @@ function truncate(text: string, maxChars: number): string {
  * (`[user]`, `[assistant]`).
  */
 const HISTORY_MARKER_LINE =
-  /^([ \t\v\f\u00a0\ufeff]*(?:--- (?:end )?past tool (?:call|result)\b|\[(?:user|assistant)\]))/gm;
+  /^((?:[^\S\r\n\u2028\u2029]|[\u200b\u200c\u2060]|\u200d)*(?:--- (?:end )?past tool (?:call|result)\b|\[(?:user|assistant)\]))/gm;
 
 /**
  * Untrusted content (user text, tool-result bodies, assistant text and
  * thinking) must not forge the bridge-generated history structure: a line
  * that starts like a record delimiter or a role header is quoted with `> `,
  * so only the bridge's own records and `[user]` / `[assistant]` headers sit at
- * a line start. Leading blanks include NBSP, BOM, vertical tab and form feed.
+ * a line start. Leading blanks are any whitespace except line terminators
+ * (NBSP, BOM, vertical tab, form feed, Unicode spaces) and the zero-width
+ * characters U+200B-U+200D and U+2060.
  * Content without such lines is returned unchanged.
  */
 function neutralizeHistoryMarkers(text: string): string {
@@ -186,7 +198,8 @@ export function renderTranscript(
   const marker = `${HEAD_TRUNCATED_MARKER}\n\n`;
   const keep = Math.max(0, maxChars - marker.length);
   const cut = text.length - keep;
-  if (keep === 0) return marker;
+  // maxChars below the marker: the marker itself is cut, never exceeding maxChars
+  if (keep === 0) return marker.slice(0, Math.max(0, maxChars));
   // A cut inside a line keeps that line's tail (a single very long line, e.g.
   // a pasted blob, must not lose the part holding the request). The kept
   // fragment now starts a line of the rendered output, so it is neutralized:
@@ -195,6 +208,10 @@ export function renderTranscript(
   // adds two characters at most: leading characters are dropped until the
   // result fits maxChars again.
   for (let start = cut; ; start += 1) {
+    // never start inside a surrogate pair: the lone low half is dropped
+    if (isLowSurrogate(text.charCodeAt(start)) && isHighSurrogate(text.charCodeAt(start - 1))) {
+      start += 1;
+    }
     if (start >= text.length || text[start - 1] === '\n') return marker + text.slice(start);
     const lineEnd = text.indexOf('\n', start);
     const fragmentEnd = lineEnd === -1 ? text.length : lineEnd;

@@ -2042,6 +2042,59 @@ describe('MistralProvider.streamSimple: dead-turn corrective retry (ADR-0010)', 
     }
   });
 
+  it('abort during the corrective response that settles as a normal end_turn: the turn ends aborted, no done event (Pi abort contract, PR #14 review)', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent, fake) => {
+        if (fake.promptCount === 1) return deadTurnScript(params, agent, fake);
+        // the corrective response is healthy text, but it only settles after
+        // the abort: the agent ignores session/cancel and answers end_turn
+        await sendUpdate(agent, params.sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'late healthy answer' },
+        });
+        await new Promise<void>((resolve) => {
+          h.fake.behavior.onCancel = () => resolve();
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const controller = new AbortController();
+      const stream = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+        signal: controller.signal,
+      });
+      const events: AssistantMessageEvent[] = [];
+      const done = (async () => {
+        for await (const event of stream) events.push(event);
+        return stream.result();
+      })();
+      await waitFor(() => h.prompts().length === 2, 'corrective prompt sent');
+      await waitFor(
+        () => events.some((e) => e.type === 'text_delta' && e.delta === 'late healthy answer'),
+        'corrective answer delivered'
+      );
+      controller.abort();
+      const message = await done;
+
+      expect(message.stopReason).toBe('aborted');
+      expect(events.at(-1)).toMatchObject({ type: 'error', reason: 'aborted' });
+      expect(events.some((e) => e.type === 'done')).toBe(false);
+      expect(h.prompts()).toHaveLength(2); // no third prompt
+      // the abort left the session dirty: the next call rebuilds
+      h.fake.behavior.promptScript = async () => ({ stopReason: 'end_turn' });
+      const second = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi'), user('again')]), {
+          sessionId: 'pi-1',
+        })
+      );
+      expect(second.message.stopReason).toBe('stop');
+      expect(h.sessionNews()).toBe(2);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
   it('pin: a corrective response that issues real tool calls ends the turn at the batch, so the delivered toolUse keeps the dead response usage and stays frozen (ADR-0010 consequence)', async () => {
     const h = makeProvider({
       promptScript: async (params, agent, fake) => {

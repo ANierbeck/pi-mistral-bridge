@@ -919,11 +919,17 @@ export class MistralProvider {
         }
         return this.handleDeadTurn(live);
       }
-      const mapped = mapStopReason(result.stopReason);
-      turn.message.stopReason = mapped.reason;
-      if (mapped.rawStopReason !== undefined) turn.message.rawStopReason = mapped.rawStopReason;
-      turn.stream.push({ type: 'done', reason: mapped.reason, message: turn.message });
-      turn.stream.end();
+      if (live.aborted) {
+        // the abort landed while the prompt was settling normally: Pi's abort
+        // contract wins over a late `done`
+        this.endAborted(turn.stream, state, turn.message, 'aborted before the prompt completed');
+      } else {
+        const mapped = mapStopReason(result.stopReason);
+        turn.message.stopReason = mapped.reason;
+        if (mapped.rawStopReason !== undefined) turn.message.rawStopReason = mapped.rawStopReason;
+        turn.stream.push({ type: 'done', reason: mapped.reason, message: turn.message });
+        turn.stream.end();
+      }
       turn.ended = true;
     }
     recordSentPrefix(state, [...live.contextMessages, turn.message]);
