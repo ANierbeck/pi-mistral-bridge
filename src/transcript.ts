@@ -90,33 +90,38 @@ function truncate(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)}${TRUNCATED_MARKER}`;
 }
 
-/** A line-initial record delimiter shape (`--- past tool call …`, `--- end past tool result …`). */
-const RECORD_DELIMITER_LINE = /^([ \t]*--- (?:end )?past tool (?:call|result)\b)/gm;
+/**
+ * A line-initial history marker shape: a past-tool record delimiter
+ * (`--- past tool call …`, `--- end past tool result …`) or a role header
+ * (`[user]`, `[assistant]`).
+ */
+const HISTORY_MARKER_LINE =
+  /^([ \t]*(?:--- (?:end )?past tool (?:call|result)\b|\[(?:user|assistant)\]))/gm;
 
 /**
  * Untrusted content (user text, tool-result bodies, assistant text and
- * thinking) must not forge the bridge-generated history records: a line that
- * starts like a record delimiter is quoted with `> `, so only the bridge's own
- * records carry the `---` shape at a line start. Content without such lines is
- * returned unchanged.
+ * thinking) must not forge the bridge-generated history structure: a line
+ * that starts like a record delimiter or a role header is quoted with `> `,
+ * so only the bridge's own records and `[user]` / `[assistant]` headers sit at
+ * a line start. Content without such lines is returned unchanged.
  */
-function neutralizeRecordDelimiters(text: string): string {
-  return text.replace(RECORD_DELIMITER_LINE, '> $1');
+function neutralizeHistoryMarkers(text: string): string {
+  return text.replace(HISTORY_MARKER_LINE, '> $1');
 }
 
-/** User/tool-result content as text: text blocks verbatim, images as `[image]`; forged record delimiters quoted. */
+/** User/tool-result content as text: text blocks verbatim, images as `[image]`; forged record delimiters and role headers quoted. */
 function renderContent(content: string | (TextContent | ImageContent)[]): string {
-  if (typeof content === 'string') return neutralizeRecordDelimiters(content);
+  if (typeof content === 'string') return neutralizeHistoryMarkers(content);
   return content
-    .map((block) => (block.type === 'text' ? neutralizeRecordDelimiters(block.text) : '[image]'))
+    .map((block) => (block.type === 'text' ? neutralizeHistoryMarkers(block.text) : '[image]'))
     .join('\n');
 }
 
 function renderAssistant(message: AssistantMessage): string {
   return message.content
     .map((block) => {
-      if (block.type === 'text') return neutralizeRecordDelimiters(block.text);
-      if (block.type === 'thinking') return neutralizeRecordDelimiters(block.thinking);
+      if (block.type === 'text') return neutralizeHistoryMarkers(block.text);
+      if (block.type === 'thinking') return neutralizeHistoryMarkers(block.thinking);
       // tool call: a delimited record of a call that already ran (the Pi
       // tool name as the bridge publishes it to Vibe); the old `[tool …]`
       // line shape was imitated as text by the model in a real run (ADR-0010)
