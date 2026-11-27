@@ -85,6 +85,11 @@ export interface RenderTranscriptOptions {
   maxToolResultChars?: number;
 }
 
+/** A character limit as given, or the default when it is missing or NaN. */
+function limitOrDefault(limit: number | undefined, fallback: number): number {
+  return limit === undefined || Number.isNaN(limit) ? fallback : limit;
+}
+
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `${keepWholePairsEnd(text.slice(0, maxChars))}${TRUNCATED_MARKER}`;
@@ -106,7 +111,7 @@ function keepWholePairsEnd(text: string): string {
  * (`[user]`, `[assistant]`).
  */
 const HISTORY_MARKER_LINE =
-  /^((?:[^\S\r\n\u2028\u2029]|[\u200b\u200c\u2060]|\u200d)*(?:--- (?:end )?past tool (?:call|result)\b|\[(?:user|assistant)\]))/gm;
+  /^((?:[^\S\r\n\u2028\u2029\ufeff]|\p{Cf}|[\u034f\u115f\u1160\u3164\uffa0])*(?:--- (?:end )?past tool (?:call|result)\b|\[(?:user|assistant)\]))/gmu;
 
 /**
  * Untrusted content (user text, tool-result bodies, assistant text and
@@ -114,8 +119,12 @@ const HISTORY_MARKER_LINE =
  * that starts like a record delimiter or a role header is quoted with `> `,
  * so only the bridge's own records and `[user]` / `[assistant]` headers sit at
  * a line start. Leading blanks are any whitespace except line terminators
- * (NBSP, BOM, vertical tab, form feed, Unicode spaces) and the zero-width
- * characters U+200B-U+200D and U+2060.
+ * (NBSP, vertical tab, form feed, Unicode spaces), every Unicode format
+ * character (`Cf`: zero-width characters, BOM, bidi marks and isolates, soft
+ * hyphen, invisible operators) and the invisible fillers that are not `Cf`
+ * (U+034F, U+115F, U+1160, U+3164, U+FFA0). The three alternatives are
+ * pairwise disjoint (the BOM, which is both whitespace and `Cf`, is left to
+ * `\p{Cf}`), so a long blank run cannot backtrack exponentially.
  * Content without such lines is returned unchanged.
  */
 function neutralizeHistoryMarkers(text: string): string {
@@ -182,10 +191,13 @@ export function renderTranscript(
   messages: readonly Message[],
   options: RenderTranscriptOptions = {}
 ): string {
-  const {
-    maxChars = DEFAULT_MAX_TRANSCRIPT_CHARS,
-    maxToolResultChars = DEFAULT_MAX_TOOL_RESULT_CHARS,
-  } = options;
+  // NaN would make every length comparison false (and the tail-cut loop
+  // below endless): it falls back to the default. +Infinity means no limit.
+  const maxChars = limitOrDefault(options.maxChars, DEFAULT_MAX_TRANSCRIPT_CHARS);
+  const maxToolResultChars = limitOrDefault(
+    options.maxToolResultChars,
+    DEFAULT_MAX_TOOL_RESULT_CHARS
+  );
   const parts: string[] = [];
   for (const message of messages) {
     if (message.role === 'system') continue;

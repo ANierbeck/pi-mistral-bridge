@@ -1,6 +1,6 @@
 # Plan: Rebuild transcripts must not render tool calls in an imitable format
 
-**Status:** in progress — 2026-11-27 (owner go on option A; T1 and the PR #12 review hardening committed; review/PR tracked as T4 in the sibling plan)
+**Status:** done — 2026-11-27 (ships with 0.1.3)
 
 Sibling plan (second problem, split out per AGENTS.md §11): [`2026-11-27-bridge-failure-feedback.md`](2026-11-27-bridge-failure-feedback.md) — dead turns end silently, no failure feedback (owner requirement C, ADR-0010).
 
@@ -18,7 +18,7 @@ Hardening from the PR #12 review: untrusted content (user text, tool-result bodi
 
 **Open decisions**
 
-- Exact record wording (worker proposes, review decides). Proposed in T1 (`2a7b3ea`): `--- past tool call pi__<name> ---` … `--- end past tool call ---` and `--- past tool result pi__<name> (<id>) ---` … `--- end past tool result ---`; final decision with the PR #12 review.
+- None. The record wording was decided in the PR #12 review: past tool calls render as `--- past tool call pi__<name> ---` … `--- end past tool call ---` and tool results as `--- past tool result pi__<name> (<id>) ---` … `--- end past tool result ---`, framed by `HISTORY_PREAMBLE` (first proposed in T1, `2a7b3ea`).
 
 **Verified against**
 
