@@ -90,39 +90,54 @@ function truncate(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)}${TRUNCATED_MARKER}`;
 }
 
-/** A line-initial record delimiter shape (`--- past tool call …`, `--- end past tool result …`). */
-const RECORD_DELIMITER_LINE = /^([ \t]*--- (?:end )?past tool (?:call|result)\b)/gm;
+/**
+ * A line-initial history marker shape: a past-tool record delimiter
+ * (`--- past tool call …`, `--- end past tool result …`) or a role header
+ * (`[user]`, `[assistant]`).
+ */
+const HISTORY_MARKER_LINE =
+  /^([ \t]*(?:--- (?:end )?past tool (?:call|result)\b|\[(?:user|assistant)\]))/gm;
 
 /**
  * Untrusted content (user text, tool-result bodies, assistant text and
- * thinking) must not forge the bridge-generated history records: a line that
- * starts like a record delimiter is quoted with `> `, so only the bridge's own
- * records carry the `---` shape at a line start. Content without such lines is
- * returned unchanged.
+ * thinking) must not forge the bridge-generated history structure: a line
+ * that starts like a record delimiter or a role header is quoted with `> `,
+ * so only the bridge's own records and `[user]` / `[assistant]` headers sit at
+ * a line start. Content without such lines is returned unchanged.
  */
-function neutralizeRecordDelimiters(text: string): string {
-  return text.replace(RECORD_DELIMITER_LINE, '> $1');
+function neutralizeHistoryMarkers(text: string): string {
+  return text.replace(HISTORY_MARKER_LINE, '> $1');
 }
 
-/** User/tool-result content as text: text blocks verbatim, images as `[image]`; forged record delimiters quoted. */
+/** User/tool-result content as text: text blocks verbatim, images as `[image]`; forged record delimiters and role headers quoted. */
 function renderContent(content: string | (TextContent | ImageContent)[]): string {
-  if (typeof content === 'string') return neutralizeRecordDelimiters(content);
+  if (typeof content === 'string') return neutralizeHistoryMarkers(content);
   return content
-    .map((block) => (block.type === 'text' ? neutralizeRecordDelimiters(block.text) : '[image]'))
+    .map((block) => (block.type === 'text' ? neutralizeHistoryMarkers(block.text) : '[image]'))
     .join('\n');
+}
+
+/**
+ * `JSON.stringify` leaves U+2028 / U+2029 literal, and `^` in the multiline
+ * history-marker regex matches after them, so a forged header inside a tool
+ * argument string could start a line. Escape them as JSON `\u2028` /
+ * `\u2029` (the record stays valid JSON); text without them is unchanged.
+ */
+function escapeLineSeparators(json: string): string {
+  return json.replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 }
 
 function renderAssistant(message: AssistantMessage): string {
   return message.content
     .map((block) => {
-      if (block.type === 'text') return neutralizeRecordDelimiters(block.text);
-      if (block.type === 'thinking') return neutralizeRecordDelimiters(block.thinking);
+      if (block.type === 'text') return neutralizeHistoryMarkers(block.text);
+      if (block.type === 'thinking') return neutralizeHistoryMarkers(block.thinking);
       // tool call: a delimited record of a call that already ran (the Pi
       // tool name as the bridge publishes it to Vibe); the old `[tool …]`
       // line shape was imitated as text by the model in a real run (ADR-0010)
       return [
         `--- past tool call ${PI_TOOL_PREFIX}${block.name} ---`,
-        canonicalJson(block.arguments),
+        escapeLineSeparators(canonicalJson(block.arguments)),
         '--- end past tool call ---',
       ].join('\n');
     })
@@ -160,7 +175,14 @@ export function renderTranscript(
   if (text.length <= maxChars) return text;
   const marker = `${HEAD_TRUNCATED_MARKER}\n\n`;
   const keep = Math.max(0, maxChars - marker.length);
-  return marker + text.slice(text.length - keep);
+  // the cut must land on a line start of the ORIGINAL text, else it can slice
+  // into a quoted forged header (`> [user]` -> `[user]`) and restore it
+  let cut = text.length - keep;
+  if (cut > 0 && cut < text.length && text[cut - 1] !== '\n') {
+    const nextLine = text.indexOf('\n', cut);
+    cut = nextLine === -1 ? text.length : nextLine + 1;
+  }
+  return marker + text.slice(cut);
 }
 
 /**
