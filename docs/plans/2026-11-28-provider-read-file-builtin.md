@@ -2,8 +2,8 @@
 
 - **Status:** approved — 2026-11-28 (owner decisions in chat: fixed set, no
   configuration; `read_file` only, because `grep` does not exist on the 3.1.4
-  unified harness; flagged reads are rejected). Implementation waits for the
-  owner to accept [ADR-0011](../adr/0011-provider-mode-read-file-builtin.md).
+  unified harness; flagged reads are rejected). [ADR-0011](../adr/0011-provider-mode-read-file-builtin.md) accepted
+  2026-11-28; the owner approved the paid T6 run (at most 2 prompts).
 - **Problem:** In provider mode every Vibe builtin is denied by policy
   (ADR-0006). Models still call them: in the owner's logs 149 `read_file`
   attempts failed with `tool_denied`, and each failure costs a model step.
@@ -15,9 +15,7 @@
   approving only bridge tools, so a flagged read is rejected; builtin
   notifications stay off the Pi stream. The mechanism, evidence and
   rejected options are in ADR-0011.
-- **Open decisions:** whether the owner approves one paid integration prompt
-  (T6) before the release. Without it, the Vibe-side behaviour is verified
-  by source reading and log evidence only.
+- **Open decisions:** none.
 - **Verified against:** `main` @ 71c9e90, `vibe-acp` 3.1.4 (installed package
   source, files named in ADR-0011), pi 1.7.0. Code: `buildEnabledToolsGlobs`
   / `buildEnabledToolsEnvValue` (`src/vibe-protocol.ts`), their tests
