@@ -183,7 +183,7 @@ describe('VibeProcessPool: spawn, env, handshake, dispose', () => {
       expect(env[VIBE_ENV.ACTIVE_MODEL]).toBe('devstral-small');
       expect(env[VIBE_ENV.DEFAULT_APPROVAL_POLICY]).toBe('ask');
       expect(env[VIBE_ENV.ENABLE_AUTO_APPROVE]).toBe('false');
-      expect(JSON.parse(env[VIBE_ENV.ENABLED_TOOLS])).toEqual(['pi_pi__*']);
+      expect(JSON.parse(env[VIBE_ENV.ENABLED_TOOLS])).toEqual(['pi_pi__*', 'read_file']);
       const mcpServers = JSON.parse(env[VIBE_ENV.MCP_SERVERS]) as any[];
       expect(mcpServers).toHaveLength(1);
       expect(mcpServers[0].name).toBe('pi');
@@ -575,6 +575,51 @@ describe('prompt: streaming, event mapping, result', () => {
     }
   });
 
+  it('keeps the enabled read_file builtin off the Pi stream: no tool event for its tool_call / tool_call_update (ADR-0011)', async () => {
+    const script: PromptScript = async (params, agent) => {
+      const sessionId = params.sessionId;
+      for (const [id, toolName] of [
+        ['effect-read', 'read_file'],
+        ['effect-fs-read', 'file_system.read_file'],
+      ] as const) {
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'tool_call',
+          toolCallId: id,
+          title: 'read_file',
+          status: 'in_progress',
+          rawInput: { path: 'note.txt' },
+          _meta: { [TOOL_CALL_META_TOOL_NAME]: toolName },
+        });
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: id,
+          status: 'completed',
+          rawOutput: { content: 'synthetic-note-4711' },
+        });
+      }
+      return { stopReason: 'end_turn' };
+    };
+    const h = makePool({ promptScript: script });
+    try {
+      const proc = await h.pool.get('devstral-small');
+      const parked: string[] = [];
+      const session = await proc.newSession({
+        cwd: CWD,
+        mcpServer: MCP_SERVER,
+        onParkedToolCall: (call) => parked.push(call.name),
+      });
+      const { events, result } = await collect(session.prompt('go'));
+      expect(result.stopReason).toBe('end_turn');
+      const toolEvents = events.filter(
+        (e) => e.type === 'tool_call' || e.type === 'tool_call_update'
+      );
+      expect(toolEvents).toEqual([]);
+      expect(parked).toEqual([]);
+    } finally {
+      await h.pool.dispose();
+    }
+  });
+
   it('passes parallel tool calls through with their ids', async () => {
     const script: PromptScript = async (params, agent) => {
       const sessionId = params.sessionId;
@@ -753,6 +798,46 @@ describe('request_permission bridge (ADR-0006)', () => {
       expect(h.anomalies).toHaveLength(2);
       expect(h.anomalies[0]).toContain('effect-evil');
       expect(h.anomalies[1]).toContain('effect-bare');
+    } finally {
+      await h.pool.dispose();
+    }
+  });
+
+  it('rejects a flagged read of the enabled read_file builtin with reject_once + anomaly (ADR-0011)', async () => {
+    // Both name forms: the registry name the brief names and the namespaced
+    // Rust-runtime form (`file_system.read_file`, ADR-0011 Context point 2).
+    const script: PromptScript = async (params, agent, fake) => {
+      const sessionId = params.sessionId;
+      for (const [id, toolName] of [
+        ['effect-read', 'read_file'],
+        ['effect-fs-read', 'file_system.read_file'],
+      ] as const) {
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'tool_call',
+          toolCallId: id,
+          title: 'read_file',
+          status: 'in_progress',
+          rawInput: { path: 'note.txt' },
+          _meta: { [TOOL_CALL_META_TOOL_NAME]: toolName },
+        });
+        await requestPermission(fake, sessionId, id);
+      }
+      return { stopReason: 'end_turn' };
+    };
+    const h = makePool({ promptScript: script });
+    try {
+      const proc = await h.pool.get('devstral-small');
+      const session = await proc.newSession({ cwd: CWD, mcpServer: MCP_SERVER });
+      const { result } = await collect(session.prompt('go'));
+      expect(result.stopReason).toBe('end_turn');
+      const decisions = h.agents[0].permissionRequests.map((r) => (r.response as any)?.outcome);
+      expect(decisions).toEqual([
+        { outcome: 'selected', optionId: PERMISSION_OPTION_REJECT_ONCE },
+        { outcome: 'selected', optionId: PERMISSION_OPTION_REJECT_ONCE },
+      ]);
+      expect(h.anomalies).toHaveLength(2);
+      expect(h.anomalies[0]).toContain('effect-read');
+      expect(h.anomalies[1]).toContain('effect-fs-read');
     } finally {
       await h.pool.dispose();
     }

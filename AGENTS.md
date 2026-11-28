@@ -13,7 +13,8 @@ Client Protocol (ACP). It has two modes:
 
 - **Provider mode** — Mistral models appear in Pi's model picker. Pi owns the
   agent loop; Pi's tools are offered to Vibe through a local MCP server and
-  every tool call is executed by Pi (ADR-0002).
+  every tool call is executed by Pi (except the read-only `read_file`
+  builtin, ADR-0011) (ADR-0002).
 - **AskVibe agent mode** — a Pi tool that delegates a task to Vibe as a
   sub-agent with Vibe's own tools; Vibe's permission requests are bridged to
   Pi's UI (ADR-0004).
@@ -277,7 +278,10 @@ The bridge must stay on exactly that path:
   random port, and requires a per-session random bearer token. It serves
   only the tools of the Pi session it belongs to.
 - In provider mode, Vibe's own tools are gated off via the process env
-  allowlist (ADR-0006). A Vibe permission request in provider mode is
+  allowlist (ADR-0006), with one exception: the read-only `read_file`
+  builtin, which Vibe resolves itself (ADR-0011). The gate covers builtins
+  Vibe maps through `RUST_BUILTIN_TOOL_SOURCES`; Vibe's agent / subagent /
+  self builtins are outside it (ADR-0011 Consequences). A Vibe permission request in provider mode is
   **answered immediately, never left pending** (a pending request makes
   `session/cancel` hang on Vibe 3.1.4): `allow_once` if the toolCallId maps
   to one of the bridge's own MCP tools, otherwise `reject_once` **and log**

@@ -18,6 +18,15 @@ Semantic Versioning.
   rewording of the rate-limit message no longer hides them; the text match
   stays as the fallback.
 
+### Changed
+
+- Provider mode enables Vibe's read-only `read_file` builtin
+  (`VIBE_ENABLED_TOOLS` is now `["<server>_pi__*", "read_file"]`), so a
+  model's file reads no longer fail with `tool_denied` and cost a wasted
+  step. Shell, writes, edits and processes stay denied; a read Vibe flags for
+  approval is still rejected with a logged anomaly, and the reads do not
+  appear as Pi tool calls (ADR-0011).
+
 ### Fixed
 
 - Debug logs are written to per-process files: `mcp-bridge-<pid>.jsonl`,

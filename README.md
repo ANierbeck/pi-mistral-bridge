@@ -5,7 +5,8 @@
 **What it is.** A [Pi](https://github.com/earendil-works/pi) extension that
 lets you use your **Mistral Vibe subscription models inside Pi** by driving
 **your own installed `vibe-acp`** over the Agent Client Protocol (ACP). Pi owns
-the agent loop and the tools; every tool call Vibe makes is executed by Pi.
+the agent loop and the tools; every tool call Vibe makes is executed by Pi (except the read-only
+`read_file` builtin, [ADR-0011](docs/adr/0011-provider-mode-read-file-builtin.md)).
 Usage bills against your **Vibe allowance**, not the API allowance: Mistral
 accepts "Mistral harnesses via ACP with third-party tools", and the announced
 billing change from 2026-12-01 moves usage of third-party harnesses that do
@@ -39,7 +40,8 @@ It has two modes:
 
 - **Provider mode** — the models your `vibe-acp` reports appear in Pi's model
   picker under a dedicated provider (default `mistral-bridge`); Pi owns the
-  agent loop and every tool call is executed by Pi.
+  agent loop and every tool call is executed by Pi (except the read-only
+  `read_file` builtin, [ADR-0011](docs/adr/0011-provider-mode-read-file-builtin.md)).
 - **AskVibe mode** — a Pi tool (`ask_vibe`) that delegates a self-contained
   task to Vibe as a sub-agent with Vibe's own tools.
 
@@ -107,7 +109,13 @@ current tools under the `pi__` prefix.
 When Vibe wants to call a Pi tool, the call is parked and surfaced to Pi as an
 ordinary tool call; Pi executes it and the bridge resolves the parked call on
 the next provider request, continuing the same ACP prompt. Vibe's own builtin
-tools are gated off in provider mode via an env allowlist, and the bridge
+tools are gated off in provider mode via an env allowlist (`VIBE_ENABLED_TOOLS`)
+with one exception: the read-only `read_file` builtin, which Vibe resolves
+itself, so a model's file reads no longer fail with `tool_denied`. These reads
+run inside Vibe and do not appear as Pi tool calls; shell, writes, edits and
+processes stay denied;
+Vibe's agent / subagent / self builtins are outside this gate
+([ADR-0011](docs/adr/0011-provider-mode-read-file-builtin.md)). The bridge
 answers Vibe's permission requests itself — `allow_once` when the request maps
 to one of the bridge's own MCP tools, `reject_once` (and a logged anomaly)
 otherwise. Auto-approve is never used in provider mode.
@@ -123,7 +131,9 @@ server-side handler keeps running after a cancel.
 
 **Policy note (honest risk).** Mistral states that use of Mistral harnesses
 via ACP with third-party tools is accepted, but does not explicitly say whether
-a session with Vibe's builtin tools disabled qualifies. If Mistral narrows
+a session with Vibe's builtin tools disabled (all but the read-only
+`read_file` and Vibe's agent / subagent / self builtins, which the gate does
+not cover) qualifies. If Mistral narrows
 that acceptance, provider mode may stop being permitted; the bridge will then
 surface the errors instead of working around them, and AskVibe (below) is the
 unambiguous mode. See

@@ -129,6 +129,22 @@ per prompt: real MCP tool calls, imitated tool-call text (`findImitatedToolCallT
 `src/transcript.ts`, read-only import), usage updates, wall time. Fixtures are synthetic; the MCP tools are
 the spike's `pi__echo` and `pi__read_note` (`lib.ts`). Never run without the owner's go for that run.
 
+## Provider-mode `read_file` builtin (docs/plans/2026-11-28-provider-read-file-builtin.md, T6)
+
+**PAID — one prompt per invocation, owner-approved budget 2 in total.**
+
+```bash
+MISTRAL_BRIDGE_IT=1 npx tsx spikes/read-file-builtin.ts <model-alias>
+```
+
+Spawns `vibe-acp` with the bridge's own provider-mode env (`VIBE_ENABLED_TOOLS` from
+`buildEnabledToolsEnvValue`, which carries `read_file`; ADR-0011) in a temp dir holding a
+synthetic `note.txt`, with no MCP server attached. Sends one prompt asking for the file via
+`read_file`, rejects every permission request, and prints a JSON summary (builtin tool calls
+with final status and error code, permission request count, whether the reply carries the
+synthetic content, stop reason). Refuses to start without `MISTRAL_BRIDGE_IT=1`; budget
+counter `spikes/out/prompt-count-read-file.json`.
+
 ## Output
 
 `spikes/out/` (git-ignored): `*-acp-raw.jsonl` (every JSON-RPC message, timestamped),
@@ -146,3 +162,4 @@ the prompts that were sent: never commit them.
 - `session-model-returns.ts` — per-model resume, step 0 (local counts).
 - `session-reattach.ts` — per-model resume, step 1 (load / resume checks, 0 prompts).
 - `catch-up-paid.ts` — per-model resume, step 2 (**paid**, prepared).
+- `read-file-builtin.ts` — provider-mode `read_file` builtin check (**paid**, prepared).

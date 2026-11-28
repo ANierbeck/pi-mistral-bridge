@@ -56,11 +56,14 @@ export const VIBE_ENV = Object.freeze({
   ENABLE_AUTO_APPROVE: 'VIBE_ENABLE_AUTO_APPROVE',
   /**
    * JSON array of tool-name globs (fnmatch, case-insensitive) matched against
-   * the published MCP display name `{server}_{tool}`. Builtins that match no
-   * glob are denied by policy (`tool_denied`, `approvalSource:"never"`) without
-   * a permission request, but their definitions stay visible to the model
-   * (paid run prompt 2). Build from the bridge's MCP server name via
-   * {@link buildEnabledToolsGlobs}.
+   * the published MCP display name `{server}_{tool}` and the plain builtin
+   * name. Builtins that match no glob and that Vibe maps through
+   * `RUST_BUILTIN_TOOL_SOURCES` are denied by policy (`tool_denied`,
+   * `approvalSource:"never"`) without a permission request, but their
+   * definitions stay visible to the model (paid run prompt 2); Vibe's agent /
+   * subagent / self builtins are outside this gate (ADR-0011 Consequences). The one
+   * enabled builtin is {@link PROVIDER_ENABLED_BUILTIN_TOOLS} (ADR-0011).
+   * Build from the bridge's MCP server name via {@link buildEnabledToolsGlobs}.
    */
   ENABLED_TOOLS: 'VIBE_ENABLED_TOOLS',
   /**
@@ -162,14 +165,28 @@ export function buildBridgeToolMetaPrefix(mcpServerName: string): string {
 }
 
 /**
- * The `VIBE_ENABLED_TOOLS` globs for the bridge's own MCP server: the server
- * publishes each Pi tool as `pi__<tool>`, so the published display name is
- * `{server}_pi__<tool>` and the allowlist is `["<server>_pi__*"]` (the paid
- * run used the looser `["pi_*","pislow_*"]`; the tighter glob matches exactly
- * the `pi__` prefix).
+ * Vibe builtins enabled in provider mode (ADR-0011, amends ADR-0006): only the
+ * read-only `read_file`; shell, writes, edits and processes stay denied.
+ * Verified on vibe-acp 3.1.4: `VIBE_ENABLED_TOOLS` filters the core tool
+ * catalogue by plain registry name (`available_tools`,
+ * `vibe/core/tools/manager.py`), and the Rust runtime sets
+ * `file_system.read_file` to `deny` when `read_file` is absent from that
+ * catalogue (`_rust_tool_modes` in `vibe/app_server/_runtime.py`,
+ * `RUST_BUILTIN_TOOL_SOURCES` in `vibe/app_server/_unified_permissions.py`).
+ * The 3.1.4 unified harness has no grep builtin, so `grep` is not listed.
+ */
+export const PROVIDER_ENABLED_BUILTIN_TOOLS = ['read_file'] as const;
+
+/**
+ * The `VIBE_ENABLED_TOOLS` globs for provider mode: the bridge's own MCP
+ * server publishes each Pi tool as `pi__<tool>`, so the published display name
+ * is `{server}_pi__<tool>` and its glob is `<server>_pi__*` (the paid run used
+ * the looser `["pi_*","pislow_*"]`; the tighter glob matches exactly the
+ * `pi__` prefix). The {@link PROVIDER_ENABLED_BUILTIN_TOOLS} follow by plain
+ * name: `["<server>_pi__*", "read_file"]` (ADR-0011).
  */
 export function buildEnabledToolsGlobs(mcpServerName: string): string[] {
-  return [`${mcpServerName}_${PI_TOOL_PREFIX}*`];
+  return [`${mcpServerName}_${PI_TOOL_PREFIX}*`, ...PROVIDER_ENABLED_BUILTIN_TOOLS];
 }
 
 /** Serializes the allowlist globs as the JSON-array env value. */
