@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as acp from '@agentclientprotocol/sdk';
 import {
   createAssistantMessageEventStream,
@@ -20,16 +20,22 @@ import {
   type AssistantMessageEventStream,
   type Message,
   type Model,
+  type SimpleStreamOptions,
   type Tool,
   type ToolResultMessage,
   type UserMessage,
 } from '@earendil-works/pi-ai';
 import type { BridgeConfig } from '../src/config.ts';
-import { QUOTA_ERROR_PREFIX, AUTH_ERROR_HINT } from '../src/acp-client.ts';
+import { AcpClientError, QUOTA_ERROR_PREFIX, AUTH_ERROR_HINT } from '../src/acp-client.ts';
 import { createMcpBridge, type CreateMcpBridgeOptions, type McpBridge } from '../src/mcp-bridge.ts';
 import { MistralProvider } from '../src/provider.ts';
 import { HISTORY_PREAMBLE, renderTranscript } from '../src/transcript.ts';
-import { PROMPT_RESPONSE_USAGE, TOOL_CALL_META_TOOL_NAME, VIBE_ENV } from '../src/vibe-protocol.ts';
+import {
+  PROMPT_RESPONSE_USAGE,
+  TOOL_CALL_META_TOOL_NAME,
+  VIBE_ENV,
+  VIBE_RATE_LIMIT_ERROR_CODE,
+} from '../src/vibe-protocol.ts';
 import {
   makeFakeSpawn,
   sendUpdate,
@@ -164,6 +170,7 @@ const bridges: McpBridge[] = [];
 const clients: Client[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers(); // a timed-out test must not leak fake timers into the next one
   for (const client of clients.splice(0)) await client.close().catch(() => {});
   for (const bridge of bridges.splice(0)) await bridge.close().catch(() => {});
 });
@@ -801,6 +808,412 @@ describe('MistralProvider.streamSimple: error surfaces', () => {
       const result = await collectStream(stream);
       expect(result.types).toEqual(['start', 'error']);
       expect(result.message.errorMessage).toContain(AUTH_ERROR_HINT);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+});
+
+describe('MistralProvider.streamSimple: rate limit reported through onResponse (Vibe -31001)', () => {
+  const rateLimitScript: PromptScript = async () => {
+    throw new acp.RequestError(VIBE_RATE_LIMIT_ERROR_CODE, 'Slow down, please', {
+      provider: 'mistral',
+      model: 'devstral-small',
+    });
+  };
+
+  /** Runs one turn; returns the outcome of the stream. */
+  async function runTurn(
+    h: ProviderHarness,
+    onResponse: unknown,
+    signal?: AbortSignal
+  ): Promise<{ types: string[]; message: AssistantMessage }> {
+    const stream = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+      sessionId: 'pi-1',
+      onResponse,
+      signal,
+    } as SimpleStreamOptions);
+    const { types, message } = await collectStream(stream);
+    return { types, message };
+  }
+
+  it('calls onResponse once with {status 429, headers {}} and the served model BEFORE the error event', async () => {
+    const h = makeProvider({ promptScript: rateLimitScript });
+    try {
+      const order: string[] = [];
+      const calls: unknown[][] = [];
+      const onResponse = vi.fn((...args: unknown[]) => {
+        calls.push(args);
+        order.push('onResponse');
+      });
+      const stream = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+        onResponse,
+      });
+      for await (const event of stream) order.push(event.type);
+      const message = await stream.result();
+      expect(order).toEqual(['start', 'onResponse', 'error']);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toEqual([{ status: 429, headers: {} }, MODEL]);
+      expect(message.stopReason).toBe('error');
+      expect(message.errorMessage).toBe(`${QUOTA_ERROR_PREFIX}: Slow down, please`);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('also reports a regex-classified quota error (text path)', async () => {
+    const h = makeProvider({
+      promptScript: async () => {
+        throw new acp.RequestError(-32000, 'HTTP 429: Mistral quota exceeded, retry later');
+      },
+    });
+    try {
+      const onResponse = vi.fn();
+      await runTurn(h, onResponse);
+      expect(onResponse).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('a throwing and a rejecting onResponse leave the stream outcome identical', async () => {
+    const outcomes: Array<{
+      types: string[];
+      stopReason: string;
+      errorMessage: string | undefined;
+    }> = [];
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      for (const onResponse of [
+        undefined,
+        (): void => {
+          throw new Error('sync boom');
+        },
+        (): Promise<void> => Promise.reject(new Error('async boom')),
+      ]) {
+        const h = makeProvider({ promptScript: rateLimitScript });
+        try {
+          const { types, message } = await runTurn(h, onResponse);
+          outcomes.push({
+            types,
+            stopReason: message.stopReason,
+            errorMessage: message.errorMessage,
+          });
+        } finally {
+          await h.provider.dispose();
+        }
+      }
+      await sleep(20);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(outcomes[0]).toEqual({
+      types: ['start', 'error'],
+      stopReason: 'error',
+      errorMessage: `${QUOTA_ERROR_PREFIX}: Slow down, please`,
+    });
+    expect(outcomes[1]).toEqual(outcomes[0]);
+    expect(outcomes[2]).toEqual(outcomes[0]);
+    expect(unhandled).toEqual([]);
+  });
+
+  it('does not call onResponse for auth errors, protocol errors, successful or aborted turns', async () => {
+    const scripts: Array<[string, PromptScript]> = [
+      [
+        'auth',
+        async () => {
+          throw acp.RequestError.authRequired('not signed in');
+        },
+      ],
+      [
+        'protocol',
+        async () => {
+          throw new acp.RequestError(-32000, 'boom');
+        },
+      ],
+      ['success', textTurnScript],
+    ];
+    for (const [label, promptScript] of scripts) {
+      const h = makeProvider({ promptScript });
+      try {
+        const onResponse = vi.fn();
+        await runTurn(h, onResponse);
+        expect(onResponse, label).not.toHaveBeenCalled();
+      } finally {
+        await h.provider.dispose();
+      }
+    }
+
+    // aborted turn: the prompt is cancelled, not failed
+    const h = makeProvider({
+      promptScript: () =>
+        new Promise((resolve) => {
+          h.fake.behavior.onCancel = () => resolve({ stopReason: 'cancelled' });
+        }),
+    });
+    try {
+      const onResponse = vi.fn();
+      const controller = new AbortController();
+      const done = runTurn(h, onResponse, controller.signal);
+      await waitFor(() => h.prompts().length === 1, 'prompt start');
+      controller.abort();
+      const { message } = await done;
+      expect(message.stopReason).toBe('aborted');
+      expect(onResponse).not.toHaveBeenCalled();
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('works without onResponse (undefined or not a function)', async () => {
+    for (const onResponse of [undefined, 'nope', 42]) {
+      const h = makeProvider({ promptScript: rateLimitScript });
+      try {
+        const { message } = await runTurn(h, onResponse);
+        expect(message.stopReason).toBe('error');
+        expect(message.errorMessage!.startsWith(QUOTA_ERROR_PREFIX)).toBe(true);
+      } finally {
+        await h.provider.dispose();
+      }
+    }
+  });
+
+  it('a never-resolving onResponse does not keep the stream open', async () => {
+    const h = makeProvider({ promptScript: rateLimitScript });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const onResponse = vi.fn(() => new Promise<void>(() => {}));
+      const pending = runTurn(h, onResponse);
+      await vi.waitFor(() => expect(onResponse).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(5_000);
+      const { message } = await pending;
+      expect(message.stopReason).toBe('error');
+      expect(message.errorMessage).toBe(`${QUOTA_ERROR_PREFIX}: Slow down, please`);
+    } finally {
+      vi.useRealTimers();
+      await h.provider.dispose();
+    }
+  });
+
+  it('reports a quota failure of the last-resort path (turn crashed before it started)', async () => {
+    const h = makeProvider();
+    try {
+      const onResponse = vi.fn();
+      // the pool cannot hand out a process: runTurn rejects before startTurn
+      (h.provider as unknown as { ensureResources: () => Promise<void> }).ensureResources =
+        async () => {
+          throw new AcpClientError('quota', `${QUOTA_ERROR_PREFIX}: early`);
+        };
+      const { types, message } = await runTurn(h, onResponse);
+      expect(types).toEqual(['error']);
+      expect(message.errorMessage).toBe(`${QUOTA_ERROR_PREFIX}: early`);
+      expect(onResponse).toHaveBeenCalledTimes(1);
+      expect(onResponse).toHaveBeenCalledWith({ status: 429, headers: {} }, MODEL);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('an abort during the onResponse wait ends the stream as aborted, once, without a second report', async () => {
+    const h = makeProvider({ promptScript: rateLimitScript });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const onResponse = vi.fn(() => new Promise<void>(() => {}));
+      const controller = new AbortController();
+      const stream = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+        onResponse,
+        signal: controller.signal,
+      });
+      const collected = collectStream(stream);
+      await vi.waitFor(() => expect(onResponse).toHaveBeenCalledTimes(1));
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(5_000);
+      const { types, message } = await collected;
+      expect(message.stopReason).toBe('aborted');
+      expect(types.filter((t) => t === 'error' || t === 'done')).toEqual(['error']);
+      expect(types.at(-1)).toBe('error');
+      expect(onResponse).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      await h.provider.dispose();
+    }
+  });
+
+  it('an abort before the quota failure settles reports nothing and ends aborted', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = makeProvider({
+      promptScript: async () => {
+        await gate;
+        throw new acp.RequestError(VIBE_RATE_LIMIT_ERROR_CODE, 'Slow down, please');
+      },
+    });
+    try {
+      const onResponse = vi.fn();
+      const controller = new AbortController();
+      const done = runTurn(h, onResponse, controller.signal);
+      await waitFor(() => h.prompts().length === 1, 'prompt start');
+      controller.abort();
+      release();
+      const { types, message } = await done;
+      expect(message.stopReason).toBe('aborted');
+      expect(types.filter((t) => t === 'error' || t === 'done')).toHaveLength(1);
+      expect(onResponse).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await h.provider.dispose();
+    }
+  });
+
+  it('waits for an asynchronous onResponse before the error event', async () => {
+    const h = makeProvider({ promptScript: rateLimitScript });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const order: string[] = [];
+      const onResponse = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              order.push('spy-resolved');
+              resolve();
+            }, 100);
+          })
+      );
+      const stream = h.provider.streamSimple(MODEL, contextOf([user('hi')]), {
+        sessionId: 'pi-1',
+        onResponse,
+      });
+      const consumed = (async () => {
+        for await (const event of stream) order.push(event.type);
+      })();
+      await vi.waitFor(() => expect(onResponse).toHaveBeenCalledTimes(1));
+      expect(order).toEqual(['start']);
+      await vi.advanceTimersByTimeAsync(100);
+      await consumed;
+      expect(order).toEqual(['start', 'spy-resolved', 'error']);
+    } finally {
+      vi.useRealTimers();
+      await h.provider.dispose();
+    }
+  });
+
+  it('a callback that rejects after the wait timed out is not an unhandled rejection', async () => {
+    const h = makeProvider({ promptScript: rateLimitScript });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const onResponse = vi.fn(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            setTimeout(() => reject(new Error('late boom')), 3_000);
+          })
+      );
+      const pending = runTurn(h, onResponse);
+      await vi.waitFor(() => expect(onResponse).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(1_500);
+      const { message } = await pending;
+      expect(message.stopReason).toBe('error');
+      expect(message.errorMessage).toBe(`${QUOTA_ERROR_PREFIX}: Slow down, please`);
+      await vi.advanceTimersByTimeAsync(5_000); // the rejection fires after the timeout won
+      vi.useRealTimers();
+      await sleep(20);
+      expect(unhandled).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      process.off('unhandledRejection', onUnhandled);
+      await h.provider.dispose();
+    }
+  });
+
+  it('reports to the onResponse of the continuation call, not the first call', async () => {
+    const h = makeProvider({
+      promptScript: async (params, agent) => {
+        await sendToolCallUpdate(agent, params.sessionId, 'effect-1', { text: 'hi' });
+        const client = await h.mcpClient();
+        await client.callTool({ name: 'pi__echo', arguments: { text: 'hi' } });
+        throw new acp.RequestError(VIBE_RATE_LIMIT_ERROR_CODE, 'Slow down, please');
+      },
+    });
+    try {
+      const firstSpy = vi.fn();
+      const secondSpy = vi.fn();
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('run the tool')]), {
+          sessionId: 'pi-1',
+          onResponse: firstSpy,
+        })
+      );
+      const call = first.message.content.find((b) => b.type === 'toolCall');
+      if (call?.type !== 'toolCall') throw new Error('expected a parked toolCall');
+      const second = await collectStream(
+        h.provider.streamSimple(
+          MODEL,
+          contextOf([user('run the tool'), first.message, toolResult(call.id, 'echo', 'out')]),
+          { sessionId: 'pi-1', onResponse: secondSpy }
+        )
+      );
+      expect(second.message.stopReason).toBe('error');
+      expect(second.message.errorMessage).toBe(`${QUOTA_ERROR_PREFIX}: Slow down, please`);
+      expect(secondSpy).toHaveBeenCalledTimes(1);
+      expect(secondSpy).toHaveBeenCalledWith({ status: 429, headers: {} }, MODEL);
+      expect(firstSpy).not.toHaveBeenCalled();
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('dispose() during the onResponse wait neither throws nor ends the stream twice', async () => {
+    const h = makeProvider({ promptScript: rateLimitScript });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const onResponse = vi.fn(() => new Promise<void>(() => {}));
+      const collected = collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi')]), { sessionId: 'pi-1', onResponse })
+      );
+      await vi.waitFor(() => expect(onResponse).toHaveBeenCalledTimes(1));
+      // dispose() may itself wait on (faked) timers: advance while it runs
+      const disposed = h.provider.dispose();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(disposed).resolves.toBeUndefined();
+      const { types } = await collected;
+      expect(types.filter((t) => t === 'error' || t === 'done')).toHaveLength(1);
+      expect(onResponse).toHaveBeenCalledTimes(1);
+      expect(h.anomalies).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      await h.provider.dispose();
+    }
+  });
+
+  it('calls onResponse as a method of the options object (this is preserved)', async () => {
+    const h = makeProvider({ promptScript: rateLimitScript });
+    try {
+      const seen: unknown[] = [];
+      const options = {
+        sessionId: 'pi-1',
+        marker: 'the-options',
+        onResponse(this: { marker: string }, response: { status: number }): void {
+          seen.push([this, this.marker, response.status]);
+        },
+      };
+      const { message } = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('hi')]), options as SimpleStreamOptions)
+      );
+      expect(message.stopReason).toBe('error');
+      expect(seen).toEqual([[options, 'the-options', 429]]);
+      expect(h.anomalies).toEqual([]);
     } finally {
       await h.provider.dispose();
     }

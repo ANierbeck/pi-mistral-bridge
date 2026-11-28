@@ -290,6 +290,16 @@ export function acpClientInfo(): Implementation {
   return { name: ACP_CLIENT_NAME, version: readBridgeVersion() };
 }
 
+/**
+ * ACP error code Vibe answers a rate limit with (`vibe/acp/exceptions.py`
+ * `RATE_LIMITED`, Vibe 3.1.4). Message shape: `Rate limit exceeded for
+ * <provider> (model: <model>).`; `data` is `{provider, model}` only — no reset
+ * time, no `Retry-After` (Vibe honours a server `Retry-After` in its own retry
+ * layer and does not forward it). The bridge classifies by this code first and
+ * keeps its text regex as the fallback.
+ */
+export const VIBE_RATE_LIMIT_ERROR_CODE = -31001;
+
 // --- Vibe-specific ACP `_meta` / extension surfaces observed on the wire (3.1.4) ---
 
 /** `session/new` response `_meta.workspace_trust` = `{status, details}` (observed on every `session/new`, e.g. `{"status":"trusted","details":null}`). */
