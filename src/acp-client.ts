@@ -297,8 +297,10 @@ function mapUsageUpdate(update: acp.UsageUpdate): {
  * ADR-0006): (a) `VIBE_ENABLED_TOOLS` admits the bridge server's tool display
  * names plus exactly one builtin, the read-only `read_file`
  * (`PROVIDER_ENABLED_BUILTIN_TOOLS`), which Vibe resolves itself; every
- * other builtin is policy-denied and never raises a
- * `session/request_permission` (docs/research/2026-11-24-vibe-acp-surface.md,
+ * other builtin that Vibe maps through `RUST_BUILTIN_TOOL_SOURCES` is
+ * policy-denied and never raises a
+ * `session/request_permission` (Vibe's agent / subagent / self builtins are
+ * outside this gate, ADR-0011 Consequences; docs/research/2026-11-24-vibe-acp-surface.md,
  * paid run prompt 2: `tool_denied` / `approvalSource:"never"` without any
  * request to the client). (b) Permission requests are approved only for
  * bridge tools: a request for any other toolCallId — a read Vibe flagged,

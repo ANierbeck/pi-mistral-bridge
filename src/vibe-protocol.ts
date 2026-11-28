@@ -57,9 +57,11 @@ export const VIBE_ENV = Object.freeze({
   /**
    * JSON array of tool-name globs (fnmatch, case-insensitive) matched against
    * the published MCP display name `{server}_{tool}` and the plain builtin
-   * name. Builtins that match no glob are denied by policy (`tool_denied`,
+   * name. Builtins that match no glob and that Vibe maps through
+   * `RUST_BUILTIN_TOOL_SOURCES` are denied by policy (`tool_denied`,
    * `approvalSource:"never"`) without a permission request, but their
-   * definitions stay visible to the model (paid run prompt 2); the one
+   * definitions stay visible to the model (paid run prompt 2); Vibe's agent /
+   * subagent / self builtins are outside this gate (ADR-0011 Consequences). The one
    * enabled builtin is {@link PROVIDER_ENABLED_BUILTIN_TOOLS} (ADR-0011).
    * Build from the bridge's MCP server name via {@link buildEnabledToolsGlobs}.
    */

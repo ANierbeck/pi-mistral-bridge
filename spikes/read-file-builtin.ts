@@ -224,4 +224,4 @@ const summary = {
     replyContainsSyntheticContent,
 };
 console.log(JSON.stringify(summary, null, 2));
-process.exit(error ? 1 : 0);
+process.exit(error || !summary.pass ? 1 : 0);
