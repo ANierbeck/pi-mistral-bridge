@@ -30,6 +30,8 @@
  *   session marked dirty, `stopReason: "aborted"` → next call rebuilds.
  * - Usage comes from the ACP side incl. cacheRead; cost is forced to 0
  *   (ADR-0003).
+ * - A quota failure is reported to Pi through the `onResponse` stream option
+ *   (status 429, empty headers, bounded wait) before the terminal error event.
  */
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -163,6 +165,9 @@ interface LiveTurn {
   pendingEvents: AcpSessionEvent[];
 }
 
+/** Upper bound for awaiting Pi's `onResponse` before the terminal error event. */
+const ON_RESPONSE_WAIT_MS = 1_000;
+
 function zeroUsage(): Usage {
   return {
     input: 0,
@@ -228,9 +233,6 @@ function mapStopReason(stopReason: acp.StopReason): {
       return { reason: 'stop', rawStopReason: stopReason === 'end_turn' ? undefined : stopReason };
   }
 }
-
-/** Upper bound for awaiting Pi's `onResponse` before the terminal error event. */
-const ON_RESPONSE_WAIT_MS = 1_000;
 
 /**
  * Fixed corrective prompt for a dead turn (ADR-0010): the model wrote tool
@@ -712,7 +714,12 @@ export class MistralProvider {
       } catch (error) {
         // sending the corrective prompt failed: end the turn like any prompt
         // failure
-        this.finishTurn(live, model, null, await this.reportRateLimitBeforeEnd(live, model, error));
+        const classified = await this.reportRateLimitBeforeEnd(live, model, error);
+        // dispose()/a replacing turn may have run while the callback was awaited
+        // (a quota error is not expected from a synchronous prompt() throw, the
+        // guard keeps this path symmetric with the main one)
+        if (this.live.get(live.key) !== live) return;
+        this.finishTurn(live, model, null, classified);
         return;
       }
     }
@@ -881,9 +888,11 @@ export class MistralProvider {
 
     if (failure !== null) {
       const error = failure instanceof AcpClientError ? failure : classifyAcpError(failure);
-      if (error.kind === 'aborted' || error.kind === 'crashed') state.dirty = true;
+      if (error.kind === 'aborted' || error.kind === 'crashed' || live.aborted) state.dirty = true;
       if (!turn.ended) {
-        if (error.kind === 'aborted') {
+        // Pi's abort contract wins over a failure that settled after the abort
+        // (e.g. a quota error while the onResponse report was awaited)
+        if (error.kind === 'aborted' || live.aborted) {
           this.endAborted(turn.stream, state, turn.message, error.message);
           turn.ended = true; // a later dispose() must not end (and rewrite) it again
         } else {
@@ -1047,7 +1056,8 @@ export class MistralProvider {
     failure: unknown
   ): Promise<AcpClientError> {
     const error = failure instanceof AcpClientError ? failure : classifyAcpError(failure);
-    if (!live.current.ended) await this.reportRateLimit(live.options, model, error);
+    if (!live.current.ended && !live.aborted)
+      await this.reportRateLimit(live.options, model, error);
     return error;
   }
 
@@ -1066,11 +1076,10 @@ export class MistralProvider {
     error: AcpClientError
   ): Promise<void> {
     if (error.kind !== 'quota') return;
-    const onResponse = options?.onResponse;
-    if (typeof onResponse !== 'function') return;
+    if (typeof options?.onResponse !== 'function') return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const pending = Promise.resolve(onResponse({ status: 429, headers: {} }, model));
+      const pending = Promise.resolve(options.onResponse({ status: 429, headers: {} }, model));
       const timeout = new Promise<void>((resolve) => {
         timer = setTimeout(resolve, ON_RESPONSE_WAIT_MS);
       });

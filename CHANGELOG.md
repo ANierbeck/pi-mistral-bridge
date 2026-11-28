@@ -12,7 +12,8 @@ Semantic Versioning.
   stream option: status `429` with empty headers, once per failed attempt and
   before the terminal error event. No `retry-after` is sent because Vibe gives
   no reset time. The error text is unchanged; a throwing, rejecting or hanging
-  callback never changes the stream's outcome.
+  callback never changes the stream's outcome, and an abort during the report
+  wait still ends the turn as `aborted`.
 - Quota errors are classified by Vibe's ACP error code `-31001` first, so
   rewording of the rate-limit message no longer hides them; the text match
   stays as the fallback.
