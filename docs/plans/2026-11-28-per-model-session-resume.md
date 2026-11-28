@@ -191,7 +191,10 @@ Findings: `docs/research/2026-11-28-per-model-session-resume-spike.md`.
    reaping, and it keeps no idle sessions open.
 2. **Go / no-go on catch-up at all.** Recommendation after steps 0–1: no-go.
    Step 0 found 0 servable returns, so the paid step 2 is not worth its
-   budget. Owner decision open.
+   budget. Decided by the owner (2026-11-28): no paid run — step 2 stays
+   off unless the bridge and router sessions jointly arrive at a concrete
+   reason to reopen it (cheapest probe: one prompt,
+   `spikes/catch-up-paid.ts --run C --reattach load`).
 3. Whether the bridge should **log flow decisions** (rebuild reason,
    catch-up, delta) in debug mode, so this kind of count needs no Pi session
    files next time. That would be its own small plan.
