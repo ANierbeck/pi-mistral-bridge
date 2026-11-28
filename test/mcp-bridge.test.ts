@@ -574,6 +574,39 @@ describe('createMcpBridge', () => {
     expect(lines.some((l) => l.includes('delivery_ignored'))).toBe(true);
   });
 
+  it('isPending is true only while a call is parked: false after deliverResults, timeout and releaseParked', async () => {
+    const bridge = await makeBridge({ toolPreTimeoutMs: 400, batchWindowMs: 30 });
+    const client = await connect(bridge);
+    const batches = recordBatches(bridge);
+    expect(bridge.isPending('unknown')).toBe(false);
+
+    // answered by Pi
+    const delivered = client.callTool({ name: 'pi__echo', arguments: { text: 'delivered' } });
+    await waitFor(() => batches.length === 1, 'first batch');
+    const deliveredId = batches[0][0].callId;
+    expect(bridge.isPending(deliveredId)).toBe(true);
+    bridge.deliverResults([{ callId: deliveredId, content: [{ type: 'text', text: 'ok' }] }]);
+    expect(bridge.isPending(deliveredId)).toBe(false);
+    await delivered;
+
+    // answered by the pre-emptive timeout
+    const timedOut = client.callTool({ name: 'pi__echo', arguments: { text: 'timed out' } });
+    await waitFor(() => batches.length === 2, 'second batch');
+    const timedOutId = batches[1][0].callId;
+    expect(bridge.isPending(timedOutId)).toBe(true);
+    expect((await timedOut).isError).toBe(true);
+    expect(bridge.isPending(timedOutId)).toBe(false);
+
+    // released when the turn is abandoned
+    const released = client.callTool({ name: 'pi__echo', arguments: { text: 'released' } });
+    await waitFor(() => batches.length === 3, 'third batch');
+    const releasedId = batches[2][0].callId;
+    expect(bridge.isPending(releasedId)).toBe(true);
+    bridge.releaseParked('turn abandoned');
+    expect(bridge.isPending(releasedId)).toBe(false);
+    expect((await released).isError).toBe(true);
+  });
+
   it('close() answers parked calls with an error result and frees the port', async () => {
     const bridge = await makeBridge();
     const client = await connect(bridge);

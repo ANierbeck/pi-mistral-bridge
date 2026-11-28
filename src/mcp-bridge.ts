@@ -118,6 +118,8 @@ export interface McpBridge {
   deliverResults(results: readonly BridgeToolResult[]): void;
   /** Starts a new turn: resets the per-turn de-dup cache (ADR-0006). */
   newTurn(): void;
+  /** True while the call is parked, i.e. not yet answered by Pi, the timeout, a release or close. */
+  isPending(callId: string): boolean;
   /** Answers all parked calls with an error result, closes the server, frees the port. */
   close(): Promise<void>;
   /**
@@ -467,6 +469,9 @@ export async function createMcpBridge(options: CreateMcpBridgeOptions = {}): Pro
       turn += 1;
       resolvedCache.clear();
       log('new_turn', { turn });
+    },
+    isPending(callId: string): boolean {
+      return pending.has(callId);
     },
     releaseParked(reason: string): void {
       for (const call of pending.values()) {

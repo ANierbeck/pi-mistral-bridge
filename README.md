@@ -256,7 +256,14 @@ to anything under Vibe's own directory.
   `mistral-bridge.json at …: "toolPreTimeoutMs" must not exceed 60000 ms …`.
   Unknown keys only warn (`pi-mistral-bridge: unknown key "…" (ignored)`).
 - **Debugging**: set `"debug": true`, reproduce, then inspect the redacted
-  JSONL log under `~/.pi/agent/logs/mistral-bridge/`.
+  JSONL logs under `~/.pi/agent/logs/mistral-bridge/`. Every file name
+  carries the id of the Pi process that wrote it, so concurrent Pi processes
+  never share a file: `mcp-bridge-<pid>.jsonl` (MCP bridge events),
+  `model-discovery-<pid>.jsonl` (model discovery) and
+  `vibe-acp-<alias>-<pid>-<n>.jsonl` (raw ACP traffic of the `<n>`-th
+  `vibe-acp` process that Pi process spawned for `<alias>`).
+  The bridge never deletes log files, so while `debug` is on the log
+  directory grows with every Pi process; remove old files by hand.
 
 ## Development
 

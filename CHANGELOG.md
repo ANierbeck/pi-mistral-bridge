@@ -18,6 +18,22 @@ Semantic Versioning.
   rewording of the rate-limit message no longer hides them; the text match
   stays as the fallback.
 
+### Fixed
+
+- Debug logs are written to per-process files: `mcp-bridge-<pid>.jsonl`,
+  `model-discovery-<pid>.jsonl` and `vibe-acp-<alias>-<pid>-<n>.jsonl`.
+  Several Pi processes used to append to the same files, so their lines
+  interleaved and JSON-RPC ids and turn counters collided. Old shared files
+  are left alone.
+- Provider mode no longer drops MCP tool calls that Vibe issues in a later
+  wave while the first batch of the same step is still with Pi. Such a call
+  used to be reported as `MCP batch of N call(s) with no running ACP prompt
+  — dropped`, stalled the turn for ~55 s and ended as a "Pi tool did not
+  finish" error for a tool Pi never saw. It is now emitted as the next tool
+  batch right after Pi's results for the first batch are delivered; a call
+  the bridge already timed out is skipped. With more than one parked prompt
+  the call cannot be attributed and is still dropped.
+
 ## 0.1.3 - 2026-11-27
 
 ### Fixed
