@@ -47,6 +47,24 @@ Semantic Versioning.
   a non-default `providerName` (for example `pi.bridge`) no longer produces a
   glob that matches nothing and policy-denies every Pi tool without a
   permission request.
+- A failed `vibe-acp` spawn (`ENOENT`, `EACCES`) is now a clean startup
+  rejection instead of an uncaught child `'error'` that could take the Pi host
+  down; once the process is running, the same handler marks it dead so pending
+  requests fail through the exit path (AGENTS.md §15).
+- `VibeProcessPool.dispose()` aborts and awaits in-flight starts: a child stuck
+  in `initialize` has no pool entry yet, so it used to outlive the pool.
+- `session/cancel` arms its watchdog before sending the notification. A
+  rejecting `session/cancel` on a live child now fails the turn and kills the
+  child (the `aborted` path) instead of leaving the prompt hung; abort handlers
+  that swallow the rejection can no longer strand a turn.
+- Tool-call metadata is dropped on the call's terminal `tool_call_update`
+  (a long-lived session retained every id and `rawInput` until it closed), and
+  the exit information recorded by `terminate()` / `killNow()` is the child's
+  real exit, so error text reports the actual code/signal instead of
+  `code null, signal none`.
+- `ask_vibe` no longer reports the requested mode as `vibeModeId` when the
+  session advertised no modes and nothing was set; it reports the session's
+  current mode (`modes.currentModeId`) or `unknown`.
 
 ## 0.1.3 - 2026-11-27
 

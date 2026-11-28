@@ -35,12 +35,12 @@ import {
   buildAcpMcpServerEntry,
 } from '../src/vibe-protocol.ts';
 import {
+  FakeVibeChild,
   makeFakeSpawn,
   requestPermission,
   sendUpdate,
   type FakeAgent,
   type FakeBehavior,
-  type FakeVibeChild,
   type PromptScript,
 } from './helpers/fake-acp-agent.ts';
 
@@ -810,6 +810,100 @@ describe('cancel + abort watchdog', () => {
       expect(result.stopReason).toBe('cancelled');
       expect(h.children[0].killedWith).toHaveLength(0);
       expect(session.dirty).toBe(false);
+    } finally {
+      await h.pool.dispose();
+    }
+  });
+});
+
+describe('child spawn failure and pool lifecycle hardening (AGENTS.md §15)', () => {
+  it('a spawn error rejects the start (no uncaught EventEmitter error) and kills the child', async () => {
+    const child = new FakeVibeChild();
+    const logDir = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-acp-spawn-'));
+    const pool = new VibeProcessPool({
+      vibeAcpPath: 'vibe-acp',
+      processIdleTimeoutMs: 600_000,
+      abortWatchdogMs: 1_000,
+      debug: false,
+      logDir,
+      spawnChild: () => {
+        // Node delivers a failed spawn as an async 'error' event on the child.
+        queueMicrotask(() => {
+          child.emit(
+            'error',
+            Object.assign(new Error('spawn vibe-acp ENOENT'), { code: 'ENOENT' })
+          );
+        });
+        return child;
+      },
+    });
+    try {
+      await expect(pool.get('devstral-small')).rejects.toThrow(/ENOENT/);
+      expect(child.killedWith.length).toBeGreaterThan(0);
+    } finally {
+      await pool.dispose();
+    }
+  });
+
+  it('dispose() aborts an in-flight start stuck in initialize (no orphaned child)', async () => {
+    const h = makePool({ onInitialize: () => new Promise(() => {}) });
+    const pending = h.pool.get('devstral-small');
+    await vi.waitFor(() => expect(h.agents).toHaveLength(1));
+    await h.pool.dispose();
+    await expect(pending).rejects.toBeInstanceOf(AcpClientError);
+    expect(h.children[0].killedWith.length).toBeGreaterThan(0);
+  });
+
+  it('fails the prompt and kills the child when session/cancel itself rejects while the child is alive', async () => {
+    const h = makePool({
+      abortWatchdogMs: 5_000,
+      promptScript: () => new Promise(() => {}), // never resolves
+    });
+    try {
+      const proc = await h.pool.get('devstral-small');
+      const session = await proc.newSession({ cwd: CWD, mcpServer: MCP_SERVER });
+      const prompt = session.prompt('go');
+      await vi.waitFor(() => {
+        expect(h.agents[0].recorded.some((r) => r.method === 'session/prompt')).toBe(true);
+      });
+      // Broken stdin while the process still looks alive: notify() rejects.
+      const internals = session as unknown as {
+        process: { notify: () => Promise<void> };
+      };
+      internals.process.notify = () => Promise.reject(new Error('stdin broken'));
+      await expect(session.cancel()).rejects.toBeInstanceOf(AcpClientError);
+      // The pre-armed watchdog path failed the turn instead of leaving it hung.
+      await expect(prompt.result()).rejects.toMatchObject({ kind: 'aborted' });
+      expect(session.dirty).toBe(true);
+      expect(h.children[0].killedWith.length).toBeGreaterThan(0);
+    } finally {
+      await h.pool.dispose();
+    }
+  });
+
+  it('drops tool-call metadata once its terminal update arrives', async () => {
+    const script: PromptScript = async (params, agent) => {
+      await sendUpdate(agent, params.sessionId, {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-1',
+        title: 'mcp_pi.pi__echo',
+        status: 'in_progress',
+        _meta: { [TOOL_CALL_META_TOOL_NAME]: 'mcp_pi.pi__echo' },
+      });
+      await sendUpdate(agent, params.sessionId, {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-1',
+        status: 'completed',
+      });
+      return { stopReason: 'end_turn' };
+    };
+    const h = makePool({ promptScript: script });
+    try {
+      const proc = await h.pool.get('devstral-small');
+      const session = await proc.newSession({ cwd: CWD, mcpServer: MCP_SERVER });
+      const { result } = await collect(session.prompt('go'));
+      expect(result.stopReason).toBe('end_turn');
+      expect(session.knownToolCallIds()).toEqual([]);
     } finally {
       await h.pool.dispose();
     }

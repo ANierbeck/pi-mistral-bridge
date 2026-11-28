@@ -338,7 +338,13 @@ export class AskVibeManager {
         // ephemeral session on failure — a set_mode error must not leak it.
         const modes = session.modes ?? modeStateFromConfigOptions(session.configOptions);
         const resolution = resolveEffectiveVibeModeId(requestedVibeModeId, modes);
-        details.vibeModeId = resolution.modeId;
+        // Contract of AskVibeDetails.vibeModeId: never report a mode that was
+        // not actually set. With nothing advertised, the resolver echoes the
+        // request as a last resort and set is false — report the session's
+        // current mode (or an explicit unknown) instead.
+        details.vibeModeId = resolution.set
+          ? resolution.modeId
+          : (modes?.currentModeId ?? 'unknown');
         if (resolution.note) {
           details.modeNote = resolution.note;
           this.options.onAnomaly?.(`ask_vibe: ${resolution.note}`);

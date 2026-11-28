@@ -119,6 +119,11 @@ export interface VibeChildProcess {
   readonly signalCode: string | null;
   kill(signal?: string): boolean;
   on(event: 'exit', listener: (code: number | null, signal: string | null) => void): unknown;
+  /**
+   * A failed spawn (ENOENT/EACCES) arrives asynchronously as `'error'`; an
+   * unhandled one is thrown out of the event loop (AGENTS.md §15).
+   */
+  on(event: 'error', listener: (error: Error) => void): unknown;
   once(event: 'exit', listener: (code: number | null, signal: string | null) => void): unknown;
 }
 
@@ -567,26 +572,26 @@ export class AcpSession {
    */
   async cancel(): Promise<void> {
     const prompt = this.activePrompt;
+    // Armed BEFORE `session/cancel`: if the notification itself rejects while
+    // the child is still alive (broken stdin, hung write), the turn must still
+    // be failed and the child killed — the caller cannot rely on a throw
+    // reaching anyone (abort handlers swallow it), which used to leave the
+    // prompt hung with no watchdog.
+    const watchdog =
+      prompt !== null && !prompt.isSettled
+        ? setTimeout(() => this.failHungPrompt(prompt), this.process.abortWatchdogMs)
+        : null;
     try {
       await this.process.notify('session/cancel', { sessionId: this.sessionId });
     } catch (error) {
-      if (this.process.alive) throw this.process.classifyError(error);
-      return; // child already dead; the pending prompt fails via the exit path
-    }
-    if (!prompt || prompt.isSettled) return;
-    const watchdog = setTimeout(() => {
-      if (this.activePrompt === prompt && !prompt.isSettled) {
-        this.markDirty();
-        prompt.fail(
-          new AcpClientError(
-            'aborted',
-            `session/cancel did not resolve within ${this.process.abortWatchdogMs} ms — killed the vibe-acp ` +
-              `child (pending-permission cancel-hang on Vibe 3.1.4, ADR-0006); session marked dirty (ADR-0003)`
-          )
-        );
-        this.process.killNow();
+      if (!this.process.alive) return; // the prompt fails through the exit path
+      if (watchdog !== null) {
+        clearTimeout(watchdog);
+        if (prompt !== null) this.failHungPrompt(prompt);
       }
-    }, this.process.abortWatchdogMs);
+      throw this.process.classifyError(error);
+    }
+    if (watchdog === null || prompt === null) return;
     try {
       await prompt.result();
     } catch {
@@ -594,6 +599,24 @@ export class AcpSession {
     } finally {
       clearTimeout(watchdog);
     }
+  }
+
+  /**
+   * Fails a prompt that `session/cancel` could not settle in time (or at all)
+   * and kills the child: pending-permission cancel-hang on Vibe 3.1.4
+   * (ADR-0006) plus the session marked dirty for a rebuild (ADR-0003).
+   */
+  private failHungPrompt(prompt: AcpPrompt): void {
+    if (this.activePrompt !== prompt || prompt.isSettled) return;
+    this.markDirty();
+    prompt.fail(
+      new AcpClientError(
+        'aborted',
+        `session/cancel did not resolve within ${this.process.abortWatchdogMs} ms — killed the vibe-acp ` +
+          `child (pending-permission cancel-hang on Vibe 3.1.4, ADR-0006); session marked dirty (ADR-0003)`
+      )
+    );
+    this.process.killNow();
   }
 
   async close(): Promise<void> {
@@ -631,6 +654,15 @@ export class AcpSession {
       );
     }
     const event = this.mapUpdate(update);
+    // A terminal update is the last event for that tool call id: no permission
+    // request or Pi mapping can need its metadata anymore, so drop it. Without
+    // this a long-lived session retained every id + rawInput until it closed.
+    if (
+      update.sessionUpdate === 'tool_call_update' &&
+      (update.status === 'completed' || update.status === 'failed')
+    ) {
+      this.toolCalls.delete(update.toolCallId);
+    }
     if (!event) return;
     if (event.type === 'usage') this.lastUsage = event.usage;
     if (event.type === 'tool_call') this.onParkedToolCall?.(event.toolCall);
@@ -843,6 +875,25 @@ export class VibeAcpProcess {
     }
     const spawnChild = options.spawnChild ?? defaultSpawnChild;
     const child = spawnChild(options.vibeAcpPath, [], env, options.cwd);
+    // A spawn failure (missing `vibe-acp`, EACCES) arrives asynchronously as a
+    // child 'error' event. An unhandled 'error' on an EventEmitter is thrown
+    // out of the event loop and would take the Pi host down, so during startup
+    // it rejects this promise; once running it marks the process dead like an
+    // exit does (AGENTS.md §15: no orphan, no uncaught error).
+    const procRef: { current: VibeAcpProcess | null } = { current: null };
+    let started = false;
+    const spawn = Promise.withResolvers<never>();
+    const spawnFailed = spawn.promise;
+    spawnFailed.catch(() => {
+      // only ever observed through the startup race below
+    });
+    child.on('error', (error: Error): void => {
+      if (!started) {
+        spawn.reject(error);
+        return;
+      }
+      procRef.current?.handleChildError(error);
+    });
     // Abort hook: kill the child the moment the signal fires — even while
     // `initialize` is still in flight — so a wedged child can never outlive
     // its owner (discovery timeout / provider dispose, AGENTS.md §15). The
@@ -873,7 +924,6 @@ export class VibeAcpProcess {
 
       // Handlers only fire once the peer sends something, which happens after
       // the initialize request below — by then procRef.current is set.
-      const procRef: { current: VibeAcpProcess | null } = { current: null };
       const app = acp
         .client({ name: ACP_CLIENT_NAME })
         .onRequest(acp.CLIENT_METHODS.session_request_permission, ({ params }) => {
@@ -907,14 +957,21 @@ export class VibeAcpProcess {
       try {
         // Honest client identification (AGENTS.md §14); no fs/terminal/elicitation
         // capabilities, so Vibe never calls back into us beyond permissions.
-        await proc.request('initialize', {
-          protocolVersion: acp.PROTOCOL_VERSION,
-          clientInfo: acpClientInfo(),
-          clientCapabilities: {
-            fs: { readTextFile: false, writeTextFile: false },
-            terminal: false,
-          },
-        });
+        // Raced against a spawn failure: a child that never started cannot
+        // answer `initialize`, and waiting for the connection to close would
+        // hang startup (the 'error' handler above rejects instead).
+        await Promise.race([
+          proc.request('initialize', {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientInfo: acpClientInfo(),
+            clientCapabilities: {
+              fs: { readTextFile: false, writeTextFile: false },
+              terminal: false,
+            },
+          }),
+          spawnFailed,
+        ]);
+        started = true;
       } catch (error) {
         await proc.terminate('initialize-failed').catch(() => {
           // the original error matters more
@@ -1042,13 +1099,31 @@ export class VibeAcpProcess {
   }
 
   private readonly handleChildExit = (code: number | null, signal: string | null): void => {
+    // Record the real exit even when markDead() already ran (terminate() marks
+    // the process unavailable before the child exits, killNow() marks it at
+    // watchdog time): classifyError() must report the actual code/signal, not
+    // the placeholder stored at that first call.
+    this.exitInfo = { code, signal };
     this.markDead(code, signal, 'exit');
   };
+
+  /**
+   * A child `error` event after startup (broken pipe while writing to a child
+   * that vanished, EPIPE on kill): mark the process dead the same way an exit
+   * does, so pending requests fail through the connection-close path instead
+   * of the error escaping the event loop (AGENTS.md §15).
+   */
+  handleChildError(error: Error): void {
+    this.onAnomaly(
+      `vibe-acp child error: ${error.message} — marking the process dead (AGENTS.md §15)`
+    );
+    this.markDead(null, null, 'child-error');
+  }
 
   private markDead(code: number | null, signal: string | null, reason: string): void {
     if (!this.alive) return;
     this.alive = false;
-    this.exitInfo = { code, signal };
+    this.exitInfo ??= { code, signal };
     this.debugLog?.write('system', { event: 'child_exit', code, signal, reason });
     // Deliberately no conn.close() here: the child's stdout EOF closes the
     // connection from the peer side, which still dispatches notifications
@@ -1142,6 +1217,8 @@ export class VibeProcessPool {
   private readonly entries = new Map<string, PoolEntry>();
   /** In-flight spawns by alias: concurrent `get`s share one spawn (no racing `entries.set`). */
   private readonly pending = new Map<string, Promise<VibeAcpProcess>>();
+  /** Abort controllers of the in-flight spawns, so `dispose()` can kill them. */
+  private readonly pendingAborts = new Set<AbortController>();
   private readonly exitHook: () => void;
   private disposed = false;
   private spawnCounter = 0;
@@ -1176,7 +1253,16 @@ export class VibeProcessPool {
     }
     // Concurrent gets of the same key share one in-flight spawn, so a
     // racing second `entries.set` can never orphan the first child.
-    const proc = await (this.pending.get(key) ?? this.startPending(key, modelAlias));
+    const proc = await (this.pending.get(key) ?? this.startPending(key, modelAlias)).catch(
+      (error: unknown) => {
+        // dispose() aborts in-flight starts: report the pool state, not only the
+        // child's death (the cause is kept for debugging).
+        if (this.disposed) {
+          throw new AcpClientError('protocol', 'VibeProcessPool is disposed', { cause: error });
+        }
+        throw error;
+      }
+    );
     if (this.disposed) {
       // dispose() ran while the start was in flight: never register into a
       // disposed pool — terminate the fresh child and fail (AGENTS.md §15).
@@ -1200,6 +1286,12 @@ export class VibeProcessPool {
 
   /** Starts one spawn for `key` and records it in {@link pending} until it settles. */
   private startPending(key: string, modelAlias: string | undefined): Promise<VibeAcpProcess> {
+    // One controller per pending start: dispose() aborts them all, and the
+    // start() abort hook SIGKILLs a child still stuck in `initialize` — a
+    // pending start is not in `entries` yet, so terminate() alone would leave
+    // that child running (AGENTS.md §15).
+    const controller = new AbortController();
+    this.pendingAborts.add(controller);
     const p = VibeAcpProcess.start({
       modelAlias,
       vibeAcpPath: this.options.vibeAcpPath,
@@ -1212,9 +1304,11 @@ export class VibeProcessPool {
       onAnomaly: this.options.onAnomaly,
       permissionHandler: this.options.permissionHandler,
       logFileBase: `vibe-acp-${sanitizeFileBase(key)}-${++this.spawnCounter}`,
+      signal: controller.signal,
     });
     this.pending.set(key, p);
     const cleanup = (): void => {
+      this.pendingAborts.delete(controller);
       if (this.pending.get(key) === p) this.pending.delete(key);
     };
     p.then(cleanup, cleanup);
@@ -1251,6 +1345,13 @@ export class VibeProcessPool {
     if (this.disposed) return;
     this.disposed = true;
     process.removeListener('exit', this.exitHook);
+    // In-flight starts have no entry yet, so terminate() below cannot see
+    // them: abort them (the start hook SIGKILLs the child) and wait for them
+    // to settle before returning, so no child outlives the pool (AGENTS.md
+    // §15). A concurrent get() then takes the disposed branch and terminates
+    // whatever it got.
+    for (const controller of this.pendingAborts) controller.abort();
+    await Promise.allSettled([...this.pending.values()]);
     const entries = [...this.entries.values()];
     this.entries.clear();
     for (const entry of entries) clearTimeout(entry.idleTimer);
