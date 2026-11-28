@@ -41,6 +41,7 @@ import {
   PROMPT_RESPONSE_USAGE,
   TOOL_CALL_META_TOOL_NAME,
   USAGE_UPDATE_META,
+  VIBE_RATE_LIMIT_ERROR_CODE,
   acpClientInfo,
   buildAcpMcpServerEntry,
   buildProviderProcessEnv,
@@ -74,15 +75,26 @@ const QUOTA_RE =
 const AUTH_RE =
   /auth|unauthori[sz]ed|\b401\b|not signed in|sign[ -]?in|log[ -]?in|api[_ -]?key|credentials|access token/i;
 
+/** True for a JSON-RPC error carrying Vibe's rate-limit code (`RequestError.code`). */
+function hasRateLimitCode(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === VIBE_RATE_LIMIT_ERROR_CODE
+  );
+}
+
 /**
  * Maps any error from an ACP request to an {@link AcpClientError} with a
- * stable kind: `quota` (message starts with {@link QUOTA_ERROR_PREFIX}),
+ * stable kind: `quota` (Vibe's rate-limit error code or a matching message;
+ * the message starts with {@link QUOTA_ERROR_PREFIX}),
  * `auth` (message names `vibe-acp --setup`), otherwise `protocol`.
  */
 export function classifyAcpError(error: unknown): AcpClientError {
   if (error instanceof AcpClientError) return error;
   const message = error instanceof Error ? error.message : String(error);
-  if (QUOTA_RE.test(message)) {
+  if (hasRateLimitCode(error) || QUOTA_RE.test(message)) {
     return new AcpClientError('quota', `${QUOTA_ERROR_PREFIX}: ${message}`, { cause: error });
   }
   if (AUTH_RE.test(message)) {
