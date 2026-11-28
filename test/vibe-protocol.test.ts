@@ -80,6 +80,15 @@ describe('allowlist glob builder (VIBE_ENABLED_TOOLS)', () => {
     expect(buildEnabledToolsGlobs('bridge')).toEqual(['bridge_pi__*']);
   });
 
+  it('normalizes the server name the same way Vibe normalizes display names', () => {
+    // Vibe publishes `{normalized_server}_pi__<tool>` and matches the allowlist
+    // against that display name; `buildMcpDisplayNamePrefix` already applies
+    // `[^A-Za-z0-9_-] -> _`. With a raw name the glob matches nothing and every
+    // Pi tool is policy-denied without a permission request.
+    expect(buildEnabledToolsGlobs('pi.bridge')).toEqual(['pi_bridge_pi__*']);
+    expect(buildEnabledToolsGlobs('pi bridge')).toEqual(['pi_bridge_pi__*']);
+  });
+
   it('serializes the globs as a JSON array env value', () => {
     expect(buildEnabledToolsEnvValue('pi')).toBe('["pi_pi__*"]');
     expect(JSON.parse(buildEnabledToolsEnvValue('pi'))).toEqual(['pi_pi__*']);

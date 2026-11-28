@@ -141,12 +141,21 @@ export const PI_TOOL_PREFIX = 'pi__';
 export const MCP_DISPLAY_NAME_PREFIX = 'mcp_';
 
 /**
- * The `mcp_<server>.` display-name prefix for a given MCP server (Vibe
- * normalizes the server name, `[^A-Za-z0-9_-]` → `_`, in display names).
+ * Vibe's normalization of an MCP server name in tool display names
+ * (`[^A-Za-z0-9_-]` → `_`, research doc "ACP mcpServers"). Everything that is
+ * matched against a display name — the `_meta` prefix, the
+ * `VIBE_ENABLED_TOOLS` allowlist — must use this form, not the raw name.
+ */
+export function normalizeMcpServerName(mcpServerName: string): string {
+  return mcpServerName.replace(/[^A-Za-z0-9_-]/g, '_');
+}
+
+/**
+ * The `mcp_<server>.` display-name prefix for a given MCP server (normalized
+ * per {@link normalizeMcpServerName}).
  */
 export function buildMcpDisplayNamePrefix(mcpServerName: string): string {
-  const normalized = mcpServerName.replace(/[^A-Za-z0-9_-]/g, '_');
-  return `${MCP_DISPLAY_NAME_PREFIX}${normalized}.`;
+  return `${MCP_DISPLAY_NAME_PREFIX}${normalizeMcpServerName(mcpServerName)}.`;
 }
 
 /**
@@ -164,12 +173,15 @@ export function buildBridgeToolMetaPrefix(mcpServerName: string): string {
 /**
  * The `VIBE_ENABLED_TOOLS` globs for the bridge's own MCP server: the server
  * publishes each Pi tool as `pi__<tool>`, so the published display name is
- * `{server}_pi__<tool>` and the allowlist is `["<server>_pi__*"]` (the paid
+ * `{server}_pi__<tool>` and the allowlist is `["{server}_pi__*"]` (the paid
  * run used the looser `["pi_*","pislow_*"]`; the tighter glob matches exactly
- * the `pi__` prefix).
+ * the `pi__` prefix). The server name is normalized exactly like the display
+ * name ({@link normalizeMcpServerName}) — with the raw name a non-default
+ * server name (e.g. `pi.bridge`) would produce a glob that matches nothing,
+ * and every Pi tool would be policy-denied without a permission request.
  */
 export function buildEnabledToolsGlobs(mcpServerName: string): string[] {
-  return [`${mcpServerName}_${PI_TOOL_PREFIX}*`];
+  return [`${normalizeMcpServerName(mcpServerName)}_${PI_TOOL_PREFIX}*`];
 }
 
 /** Serializes the allowlist globs as the JSON-array env value. */

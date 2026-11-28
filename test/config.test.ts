@@ -234,6 +234,40 @@ describe('config validation', () => {
     expect(loadError(watchdog.cwd, watchdog.home)).toContain('abortWatchdogMs');
   });
 
+  it('names the offending value when a timeout is numeric but out of range', () => {
+    const zero = makeSandbox();
+    writeGlobal(zero.home, JSON.stringify({ abortWatchdogMs: 0 }));
+    expect(loadError(zero.cwd, zero.home)).toContain('got 0');
+
+    const negative = makeSandbox();
+    writeGlobal(negative.home, JSON.stringify({ processIdleTimeoutMs: -5 }));
+    expect(loadError(negative.cwd, negative.home)).toContain('got -5');
+  });
+
+  it('rejects timer values above the 32-bit limit Node clamps to 1 ms', () => {
+    // Node's timers overflow above 2^31-1 ms: the delay is silently set to
+    // 1 ms (TimeoutOverflowWarning), so an idle reaper/refresh interval would
+    // fire in a loop. Every duration key must be bounded.
+    const keys = [
+      'processIdleTimeoutMs',
+      'abortWatchdogMs',
+      'discoveryTimeoutMs',
+      'startupDiscoveryTimeoutMs',
+      'modelRefreshIntervalMs',
+    ] as const;
+    for (const key of keys) {
+      const { home, cwd } = makeSandbox();
+      writeGlobal(home, JSON.stringify({ [key]: 2_147_483_648 }));
+      const message = loadError(cwd, home);
+      expect(message).toContain(key);
+      expect(message).toContain('2147483647');
+    }
+
+    const boundary = makeSandbox();
+    writeGlobal(boundary.home, JSON.stringify({ processIdleTimeoutMs: 2_147_483_647 }));
+    expect(load(boundary.cwd, boundary.home).processIdleTimeoutMs).toBe(2_147_483_647);
+  });
+
   it('accepts a custom abortWatchdogMs from the project file', () => {
     const { home, cwd } = makeSandbox();
     writeProject(cwd, JSON.stringify({ abortWatchdogMs: 1_500 }));

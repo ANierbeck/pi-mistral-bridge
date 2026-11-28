@@ -143,15 +143,39 @@ interface ConfigDraft {
   askVibe?: Partial<AskVibeConfig>;
 }
 
+/**
+ * Largest delay Node's timers accept. Past it the delay overflows a 32-bit
+ * signed integer and Node silently uses 1 ms instead
+ * (`TimeoutOverflowWarning`), which would turn the pool idle reaper or the
+ * refresh interval into a hot loop — so config values above it are rejected
+ * instead of being handed to `setTimeout`/`setInterval`.
+ */
+export const MAX_TIMER_MS = 2_147_483_647;
+
+/** A config value as it is shown in an error: the literal for primitives, the type otherwise. */
+function describeValue(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'boolean' || value === null) {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') return String(value);
+  return typeName(value);
+}
+
 function fail(path: string, key: string, expectation: string, actual: unknown): never {
   throw new Error(
-    `mistral-bridge.json at ${path}: "${key}" must be ${expectation}, got ${typeName(actual)}`
+    `mistral-bridge.json at ${path}: "${key}" must be ${expectation}, got ${describeValue(actual)}`
   );
 }
 
 function requirePositiveMs(path: string, key: string, value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     fail(path, key, 'a positive number (ms)', value);
+  }
+  if (value > MAX_TIMER_MS) {
+    throw new Error(
+      `mistral-bridge.json at ${path}: "${key}" must not exceed ${MAX_TIMER_MS} ms — ` +
+        `Node clamps larger timer delays to 1 ms (TimeoutOverflowWarning), got ${value}`
+    );
   }
   return value;
 }
