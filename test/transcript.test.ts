@@ -301,6 +301,68 @@ describe('findImitatedToolCallText (dead-turn detection, ADR-0010)', () => {
   });
 });
 
+describe('findImitatedToolCallText: fabricated transcript markers (dead-turn detection, ADR-0010)', () => {
+  /** A fabricated quoted transcript turn: the model writes a tool call AND its
+   *  result as plain text in the bridge's own rendered marker format. */
+  const FABRICATED_QUOTED_TURN = [
+    '> --- past tool call pi__bash ---',
+    '> {"command":"echo hi","timeout":30}',
+    '> --- end past tool call ---',
+    '',
+    '> --- past tool result pi__bash (abc123) ---',
+    '> hi',
+    '> --- end past tool result ---',
+  ].join('\n');
+
+  it('flags a fabricated quoted transcript turn without a real tool call', () => {
+    expect(
+      findImitatedToolCallText([
+        { type: 'thinking', thinking: 'hmm' },
+        { type: 'text', text: FABRICATED_QUOTED_TURN },
+      ])
+    ).toBe(true);
+  });
+
+  it('flags an unquoted line-initial past-tool-call marker', () => {
+    expect(
+      findImitatedToolCallText([
+        { type: 'text', text: '--- past tool call pi__subagent ---\n{"prompt":"do it"}' },
+      ])
+    ).toBe(true);
+  });
+
+  it('flags a line-initial past-tool-result marker alone', () => {
+    expect(
+      findImitatedToolCallText([
+        { type: 'text', text: '--- past tool result pi__bash (abc123) ---\ndone' },
+      ])
+    ).toBe(true);
+  });
+
+  it('never flags fabricated transcript text alongside a real tool call', () => {
+    expect(
+      findImitatedToolCallText([
+        { type: 'thinking', thinking: 'hmm' },
+        { type: 'text', text: FABRICATED_QUOTED_TURN },
+        { type: 'toolCall', id: 'c', name: 'bash', arguments: {} },
+      ])
+    ).toBe(false);
+  });
+
+  it('does not flag healthy text or a marker embedded mid-line', () => {
+    expect(
+      findImitatedToolCallText([
+        { type: 'text', text: 'plain answer without any transcript marker' },
+      ])
+    ).toBe(false);
+    expect(
+      findImitatedToolCallText([
+        { type: 'text', text: 'as shown in --- past tool call pi__bash --- above' },
+      ])
+    ).toBe(false);
+  });
+});
+
 describe('HISTORY_PREAMBLE (rebuild prompt framing, ADR-0003)', () => {
   it('is one short English paragraph that frames the transcript as a read-only log of already executed tool calls and forbids writing tool calls as text', () => {
     expect(typeof HISTORY_PREAMBLE).toBe('string');

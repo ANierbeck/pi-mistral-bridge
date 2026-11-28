@@ -274,16 +274,30 @@ export function renderDelta(newMessages: readonly Message[]): string | acp.Conte
 const IMITATED_TOOL_CALL_TEXT_PATTERN = /^[ \t]*\[tool [A-Za-z0-9_.-]+ \{/m;
 
 /**
+ * Line-initial bridge transcript marker ("--- past tool call/result pi__<name>"),
+ * optionally markdown-blockquoted — after a post-compaction rebuild some models
+ * fabricate whole transcript turns (call and result) as plain text in the
+ * bridge's own rendered marker format instead of calling tools.
+ */
+const IMITATED_TRANSCRIPT_MARKER_PATTERN =
+  /^[ \t]*(?:>[ \t]*)*--- past tool (?:call|result) pi__[A-Za-z0-9_.-]+/m;
+
+/**
  * Detects a dead turn (ADR-0010): the response contains no real `toolCall`
  * block, but its text starts a line with tool-call-shaped text
- * (`[tool <name> {…}]`) — the model wrote a tool call as literal text
+ * (`[tool <name> {…}]`) or with one of the bridge's own transcript markers
+ * (`--- past tool call/result pi__<name>`, optionally blockquoted) — the
+ * model wrote a tool call (or a whole past-tool record) as literal text
  * instead of calling it. A response with at least one real toolCall block
- * is never dead: tool-call-shaped text can then be quoted text.
+ * is never dead: such text can then be quoted text.
  */
 export function findImitatedToolCallText(content: AssistantMessage['content']): boolean {
   if (content.some((block) => block.type === 'toolCall')) return false;
   return content.some(
-    (block) => block.type === 'text' && IMITATED_TOOL_CALL_TEXT_PATTERN.test(block.text)
+    (block) =>
+      block.type === 'text' &&
+      (IMITATED_TOOL_CALL_TEXT_PATTERN.test(block.text) ||
+        IMITATED_TRANSCRIPT_MARKER_PATTERN.test(block.text))
   );
 }
 
