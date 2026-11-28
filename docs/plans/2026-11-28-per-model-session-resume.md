@@ -162,8 +162,9 @@ Findings: `docs/research/2026-11-28-per-model-session-resume-spike.md`.
     the recorded prefix no longer matched.
   - Catch-up could have served **0 of 12**.
   - The sample is small: one session holds 9 of the 12 entries.
-  - The router's count (18, 12 inside one turn) was not reconciled. The
-    spike excluded subagent session files.
+  - Reconciled with the router (2026-11-28): main sessions match at 12
+    entries / 6 inside one turn; the router's overall 18 / 12 adds subagent
+    session files (6 further entries, all mid-turn).
 - **Step 1: reattaching closed or restarted sessions fails** on
   never-prompted sessions. After `session/close` or a process kill, both
   `session/load` and `session/resume` fail with `-32602 Session not found`.
@@ -220,4 +221,5 @@ Findings: `docs/research/2026-11-28-per-model-session-resume-spike.md`.
 - Pi 1.7.0 installed vs `@earendil-works/pi-*` `^1.6.0` devDependencies.
   This is a mismatch under AGENTS.md §10, to be handled in its own
   alignment round, not in this plan.
-- Not verified: the router's count of 18 bridge entries, 12 inside one turn.
+- Reconciled with the router (2026-11-28): its overall 18 bridge entries, 12 inside one turn,
+  include subagent session files; restricted to main sessions both sides count 12 / 6.

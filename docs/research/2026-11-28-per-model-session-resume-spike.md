@@ -84,11 +84,11 @@ Reading:
 - The data is concentrated: **one session file holds 9 of the 12 entries and all 5 returns** (each of
   three other files holds one first entry). In that session a compaction entry follows every few bridge messages
   (the sequence shows `compaction` between almost every pair of bridge turns). Whether this is typical or a one-off was not examined further.
-- **Does not match the plan's router count** (18 entries, 12 inside one turn; this scan: 12 entries,
-  6 inside one turn). Not reconciled. Candidate reasons, none checked: the router also counts entries
-  that never produced an assistant message in the file, or provider labels other than the two tried;
-  the plan itself says the router count was unverified. This scan counts only what was written to the
-  Pi session files.
+- **Matches the router count once the scope is aligned** (reconciled 2026-11-28). This scan found 12
+  entries, 6 inside one turn. The router's overall figure of 18 / 12 includes subagent session files;
+  restricted to main sessions it also counts 12 / 6. Counting method identical on both sides: per
+  assistant entry, model change against the previous entry; turn-start = first entry after a user
+  message, mid-turn = later entries of the same turn.
 
 ## Step 1 — `session/load` and `session/resume` without a prompt
 
@@ -199,17 +199,20 @@ found` as Q1 predicts, and the run stops without a prompt).
   - Bridge-side debug logging of flow decisions (rebuild reason, delta, continuation) would give
     real counts instead of reconstructing them from Pi session files. That would be a separate
     plan.
-- **For the router side:**
-  - The bridge-side count is 12 switch entries, 6 of them inside one turn, against the router's 18
-    and 12.
-  - The difference is not reconciled. One likely cause is that the spike excludes subagent
-    session files, and the router count may include them.
+- **For the router side (reconciled 2026-11-28):**
+  - The router recomputed the same window and both counts agree: restricted to main sessions the
+    router also counts 12 switch entries, 6 of them inside one turn.
+  - The delta in the overall figure (18 / 12) is entirely the subagent session files: 6 further
+    entries, all mid-turn. Identical counting method on both sides: per assistant entry, model change
+    against the previous entry; turn-start = first entry after a user message, mid-turn = later
+    entries of the same turn.
 
 ## Limits
 
 - Step 0 is a single machine, single owner, a short window and **5 returns**: it shows the shape of the
-  data, not a rate. Message timestamps are approximate for the 10 min gap. The count was not
-  reconciled with the router's (18 / 12).
+  data, not a rate. Message timestamps are approximate for the 10 min gap. The count is reconciled
+  with the router's (2026-11-28): main sessions match at 12 / 6, the overall 18 / 12 adds subagent
+  session files.
 - Step 1 covers only never-prompted sessions. Everything that matters for the proposal (is a
   _prompted_ session loadable, which model it reports, what `load` replays) is open until step 2.
 - One `vibe-acp` version (3.1.4), one machine, one run of the step-1 script. Timings are single
