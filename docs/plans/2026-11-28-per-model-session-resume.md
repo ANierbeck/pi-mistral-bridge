@@ -1,7 +1,8 @@
 # Resume per-model ACP sessions instead of rebuilding on a model switch
 
-**Status:** approved for the spike (steps 0–2) — 2026-11-28; implementation
-(steps 4–6) waits for the spike findings and an owner decision.
+**Status:** done — 2026-11-28. Spike steps 0–1 ran (0 prompts). The paid step 2
+was **not run**, and implementation (steps 4–6) is **not recommended**; see
+[Outcome](#outcome). The owner's go/no-go is open decision 2.
 
 ## Problem
 
@@ -150,13 +151,47 @@ catch-up delta". The owner decides go, no-go or a different mechanism.
 6. README, CHANGELOG `Unreleased`. An owner-approved integration run with
    its own budget.
 
+## Outcome
+
+Findings: `docs/research/2026-11-28-per-model-session-resume-spike.md`.
+
+- **Step 0: no return was servable.** The owner's main sessions
+  2026-11-18..28 had 12 entries into a bridge model after another model:
+  - 7 were first entries, which need a rebuild anyway.
+  - 5 were returns. All 5 had a compaction since the model's last use, so
+    the recorded prefix no longer matched.
+  - Catch-up could have served **0 of 12**.
+  - The sample is small: one session holds 9 of the 12 entries.
+  - The router's count (18, 12 inside one turn) was not reconciled. The
+    spike excluded subagent session files.
+- **Step 1: reattaching closed or restarted sessions fails** on
+  never-prompted sessions. After `session/close` or a process kill, both
+  `session/load` and `session/resume` fail with `-32602 Session not found`.
+  Only a session that was never closed reattaches, in the same process.
+  - It is untested whether Vibe persists a session after its first turn.
+    That needs a real prompt.
+  - Q2 (the model a loaded session reports) and Q3 (whether `load` replays
+    real history) are therefore open.
+- **Consequence:** the rebuilds that matter come from first entries and from
+  compaction, not from returns. A smaller rebuild count is better served by
+  avoiding unneeded switches on the router side (sticky session model) than
+  by bridge-side reattach.
+- **Plan correction:** run L costs 2 prompts, not 1. The step-2 table would
+  be exactly 10 with no spare.
+- **If the question comes back** (more returns without compaction, or a new
+  Vibe version), the cheapest next probe is one prompt:
+  `spikes/catch-up-paid.ts --run C --reattach load`. It shows whether a
+  prompted session survives `close` and is loadable. Run it only with an
+  owner-approved budget.
+
 ## Open decisions
 
 1. **Mechanism:** keep sessions open vs close and `load`/`resume`. Decided
    by spike Q1. Prefer (b) if it works: it also covers restarts and idle
    reaping, and it keeps no idle sessions open.
-2. **Go / no-go on catch-up at all**, if C1–C3 imitate or Step 0 shows
-   returns are rare.
+2. **Go / no-go on catch-up at all.** Recommendation after steps 0–1: no-go.
+   Step 0 found 0 servable returns, so the paid step 2 is not worth its
+   budget. Owner decision open.
 3. Whether the bridge should **log flow decisions** (rebuild reason,
    catch-up, delta) in debug mode, so this kind of count needs no Pi session
    files next time. That would be its own small plan.

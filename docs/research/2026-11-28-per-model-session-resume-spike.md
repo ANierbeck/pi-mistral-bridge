@@ -12,7 +12,8 @@ rebuild. This note holds what could be checked **without spending a single `sess
 - Step 0: how often do returns happen in the owner's real Pi sessions? (local, read-only)
 - Step 1: do `session/load` / `session/resume` work on closed, open and restarted sessions? (real
   `vibe-acp`, zero prompts)
-- Step 2: the paid catch-up script is **prepared, not run**.
+- Step 2: the paid catch-up script is **prepared, not run**. Because of step 0, it is not
+  recommended to run it (see [Conclusion](#conclusion)).
 
 **Prompts used in this task: 0.** The scripts refuse `session/prompt` and every `session/set_*`
 request (allowlist). Checked on the wire: none of the raw JSON-RPC logs of the three step-1 processes
@@ -183,6 +184,26 @@ found` as Q1 predicts, and the run stops without a prompt).
 - Records per prompt: real tool calls (ACP `tool_call` updates and MCP `tools/call` from the loopback
   log), imitated tool-call text and dead-turn flag, `usage_update`s, wall time, stop reason, reply
   text, and `answerHas…` checks. Result JSON goes to `spikes/out/` (git-ignored).
+
+## Conclusion
+
+- In the observed data a catch-up delta would have replaced **0 of 12** rebuilds caused by model
+  switches.
+  - First entries (7) need a rebuild by definition.
+  - Every return (5 of 5) followed a compaction.
+- The mechanism is unproven. Reattaching after `session/close` or a restart fails for
+  never-prompted sessions. The prompted case is untested.
+- The controller's recommendation: do not run step 2, and do not implement catch-up now.
+  - Fewer rebuilds come cheaper from the router: avoid unneeded switches with a sticky session
+    model.
+  - Bridge-side debug logging of flow decisions (rebuild reason, delta, continuation) would give
+    real counts instead of reconstructing them from Pi session files. That would be a separate
+    plan.
+- **For the router side:**
+  - The bridge-side count is 12 switch entries, 6 of them inside one turn, against the router's 18
+    and 12.
+  - The difference is not reconciled. One likely cause is that the spike excludes subagent
+    session files, and the router count may include them.
 
 ## Limits
 
