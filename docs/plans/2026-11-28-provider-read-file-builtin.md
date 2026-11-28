@@ -1,6 +1,8 @@
 # Provider mode: enable Vibe's read-only `read_file` builtin
 
-- **Status:** approved — 2026-11-28 (owner decisions in chat: fixed set, no
+- **Status:** in progress — 2026-11-28: T1–T5 and T7 done; the T6 script
+  `spikes/read-file-builtin.ts` is written but has not been run. Approved
+  2026-11-28 (owner decisions in chat: fixed set, no
   configuration; `read_file` only, because `grep` does not exist on the 3.1.4
   unified harness; flagged reads are rejected). [ADR-0011](../adr/0011-provider-mode-read-file-builtin.md) accepted
   2026-11-28; the owner approved the paid T6 run (at most 2 prompts).
@@ -29,22 +31,22 @@
 
 ## Tasks
 
-- [ ] T1 (red) — `test/vibe-protocol.test.ts`: `buildEnabledToolsGlobs('pi')`
+- [x] T1 (red) — `test/vibe-protocol.test.ts`: `buildEnabledToolsGlobs('pi')`
   equals `['pi_pi__*', 'read_file']`; `buildEnabledToolsEnvValue('pi')` is
   the matching JSON array; the spawn env carries it. RED against the current
   globs.
-- [ ] T2 — `src/vibe-protocol.ts`: exported constant (e.g.
+- [x] T2 — `src/vibe-protocol.ts`: exported constant (e.g.
   `PROVIDER_ENABLED_BUILTIN_TOOLS = ['read_file'] as const`) with a doc
   comment that cites ADR-0011 and the Vibe 3.1.4 source locations;
   `buildEnabledToolsGlobs` appends it; update the function doc comment.
-- [ ] T3 (pin) — `test/acp-client.test.ts`: in provider mode, a `tool_call`
+- [x] T3 (pin) — `test/acp-client.test.ts`: in provider mode, a `tool_call`
   with `_meta.tool_name: "read_file"` followed by `session/request_permission`
   for its id is answered `reject_once`, and the anomaly sink is called.
   It is a pin, not red, if the current code already does this; say so.
-- [ ] T4 (pin) — `test/acp-client.test.ts`: provider-mode `tool_call` /
+- [x] T4 (pin) — `test/acp-client.test.ts`: provider-mode `tool_call` /
   `tool_call_update` notifications for `read_file` produce no tool event
   for the provider (same pin rule).
-- [ ] T5 — docs: `isBridgeToolName` safety comment (ADR-0011 Consequences),
+- [x] T5 — docs: `isBridgeToolName` safety comment (ADR-0011 Consequences),
   the `mapUpdate` provider-path comment, AGENTS.md §15 (one exception:
   `read_file`, ADR-0011), README provider-mode tool section, CHANGELOG
   `## Unreleased` (Changed).
@@ -52,6 +54,6 @@
   run: `MISTRAL_BRIDGE_IT=1`, one prompt on one model, asking the model to
   read a synthetic file in a temp cwd with Vibe's `read_file`. Pass when
   the `tool_call_update` is `completed` without a permission request.
-  Budget: at most 2 prompts.
-- [ ] T7 — gates as in AGENTS.md §4 plus `npm run test:coverage` and
+  Budget: at most 2 prompts. Script: `spikes/read-file-builtin.ts`.
+- [x] T7 — gates as in AGENTS.md §4 plus `npm run test:coverage` and
   `npm run build`.

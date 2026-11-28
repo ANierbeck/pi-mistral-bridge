@@ -293,14 +293,16 @@ function mapUsageUpdate(update: acp.UsageUpdate): {
  * which the user's own Vibe config can contribute to every session) is
  * rejected, as is the bare `pi__<tool>` form.
  *
- * Safety assumption behind mapping by tool name at all: this prefix check is
- * only safe because `VIBE_ENABLED_TOOLS` restricts execution to the bridge
- * server's tool display names, and policy-denied tools never raise a
+ * Safety argument behind mapping by tool name at all (ADR-0011, amending
+ * ADR-0006): (a) `VIBE_ENABLED_TOOLS` admits the bridge server's tool display
+ * names plus exactly one builtin, the read-only `read_file`
+ * (`PROVIDER_ENABLED_BUILTIN_TOOLS`), which Vibe resolves itself; every
+ * other builtin is policy-denied and never raises a
  * `session/request_permission` (docs/research/2026-11-24-vibe-acp-surface.md,
- * paid run prompt 2: builtin attempts failed with `tool_denied` /
- * `approvalSource:"never"` without any request to the client). A permission
- * request for a non-bridge toolCallId can therefore only be an anomaly,
- * which the bridge answers `reject_once` and logs (ADR-0006).
+ * paid run prompt 2: `tool_denied` / `approvalSource:"never"` without any
+ * request to the client). (b) Permission requests are approved only for
+ * bridge tools: a request for any other toolCallId — a read Vibe flagged,
+ * or an anomaly — is answered `reject_once` and logged.
  */
 export function isBridgeToolName(
   toolName: unknown,
@@ -666,7 +668,9 @@ export class AcpSession {
           };
         }
         // builtins and the search_tool_functions discovery pseudo-tool are
-        // ignored for Pi mapping (they are denied by policy anyway, ADR-0006)
+        // ignored for Pi mapping. The enabled read_file builtin may execute
+        // inside Vibe (ADR-0011), but it stays off the Pi stream: Pi would
+        // try to execute an unknown tool (ADR-0002, ADR-0003).
         if (!isBridgeToolName(toolName, this.process.mcpServerName)) return null;
         return {
           type: 'tool_call',

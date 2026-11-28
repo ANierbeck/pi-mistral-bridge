@@ -21,6 +21,7 @@ import {
   PERMISSION_OPTION_ALLOW_ONCE,
   PERMISSION_OPTION_REJECT_ONCE,
   PI_TOOL_PREFIX,
+  PROVIDER_ENABLED_BUILTIN_TOOLS,
   SESSION_NEW_META_WORKSPACE_TRUST,
   TOOL_CALL_META_EFFECT_KIND,
   TOOL_CALL_META_TOOL_NAME,
@@ -75,14 +76,18 @@ describe('allowlist glob builder (VIBE_ENABLED_TOOLS)', () => {
     expect(PI_TOOL_PREFIX).toBe('pi__');
   });
 
-  it('builds ["<server>_pi__*"] from the MCP server name', () => {
-    expect(buildEnabledToolsGlobs('pi')).toEqual(['pi_pi__*']);
-    expect(buildEnabledToolsGlobs('bridge')).toEqual(['bridge_pi__*']);
+  it('pins read_file as the only enabled Vibe builtin (ADR-0011)', () => {
+    expect(PROVIDER_ENABLED_BUILTIN_TOOLS).toEqual(['read_file']);
+  });
+
+  it('builds ["<server>_pi__*", "read_file"] from the MCP server name (ADR-0011)', () => {
+    expect(buildEnabledToolsGlobs('pi')).toEqual(['pi_pi__*', 'read_file']);
+    expect(buildEnabledToolsGlobs('bridge')).toEqual(['bridge_pi__*', 'read_file']);
   });
 
   it('serializes the globs as a JSON array env value', () => {
-    expect(buildEnabledToolsEnvValue('pi')).toBe('["pi_pi__*"]');
-    expect(JSON.parse(buildEnabledToolsEnvValue('pi'))).toEqual(['pi_pi__*']);
+    expect(buildEnabledToolsEnvValue('pi')).toBe('["pi_pi__*","read_file"]');
+    expect(JSON.parse(buildEnabledToolsEnvValue('pi'))).toEqual(['pi_pi__*', 'read_file']);
   });
 });
 
@@ -121,7 +126,7 @@ describe('provider-mode process env (ADR-0006 / ADR-0007)', () => {
     expect(env[VIBE_ENV.DEFAULT_APPROVAL_POLICY]).toBe(APPROVAL_POLICY_ASK);
     expect(env[VIBE_ENV.ENABLE_AUTO_APPROVE]).toBe('false');
     expect(env[VIBE_ENV.ENABLE_AUTO_APPROVE]).toBe(DISABLE_AUTO_APPROVE);
-    expect(env[VIBE_ENV.ENABLED_TOOLS]).toBe('["pi_pi__*"]');
+    expect(env[VIBE_ENV.ENABLED_TOOLS]).toBe('["pi_pi__*","read_file"]');
     expect(JSON.parse(env[VIBE_ENV.MCP_SERVERS])).toHaveLength(1);
   });
 
