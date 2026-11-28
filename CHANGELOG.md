@@ -18,6 +18,14 @@ Semantic Versioning.
   rewording of the rate-limit message no longer hides them; the text match
   stays as the fallback.
 
+### Fixed
+
+- Debug logs are written to per-process files: `mcp-bridge-<pid>.jsonl`,
+  `model-discovery-<pid>.jsonl` and `vibe-acp-<alias>-<pid>-<n>.jsonl`.
+  Several Pi processes used to append to the same files, so their lines
+  interleaved and JSON-RPC ids and turn counters collided. Old shared files
+  are left alone.
+
 ## 0.1.3 - 2026-11-27
 
 ### Fixed

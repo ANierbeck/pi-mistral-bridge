@@ -3,7 +3,7 @@
 // fake ACP agent (test/helpers/fake-acp-agent.ts, AGENTS.md §4: no real
 // vibe-acp); the MCP side is the REAL loopback bridge with a real MCP client
 // playing Vibe's role (parallel tool calls arrive as one batch, ADR-0006).
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -1477,6 +1477,37 @@ describe('MistralProvider: resource creation races (one bridge/pool, dispose dur
       expect(bridgeClosed).toBe(true);
       // no vibe-acp child was spawned for the disposed provider
       expect(fake.spawns).toHaveLength(0);
+    } finally {
+      await provider.dispose();
+    }
+  });
+});
+
+describe('MistralProvider: per-process debug log files (AGENTS.md §15)', () => {
+  it('writes the bridge log to mcp-bridge-<pid>.jsonl and the pool log to vibe-acp-<alias>-<pid>-<n>.jsonl', async () => {
+    const fake = makeFakeSpawn({ promptScript: textTurnScript });
+    const logDir = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-provider-debug-logs-'));
+    const provider = new MistralProvider({
+      config: { ...CONFIG, debug: true },
+      cwd: CWD,
+      aliasByApiId: ALIAS_BY_API_ID,
+      spawnChild: fake.spawnChild,
+      onAnomaly: () => {},
+      logDir,
+      createBridge: async (options: CreateMcpBridgeOptions) => {
+        const bridge = await createMcpBridge({ batchWindowMs: 30, ...options });
+        bridges.push(bridge);
+        return bridge;
+      },
+    });
+    try {
+      await collectStream(
+        provider.streamSimple(MODEL, contextOf([user('hi')]), { sessionId: 'pi-1' })
+      );
+      expect(readdirSync(logDir).sort()).toEqual([
+        `mcp-bridge-${process.pid}.jsonl`,
+        `vibe-acp-devstral-small-${process.pid}-1.jsonl`,
+      ]);
     } finally {
       await provider.dispose();
     }

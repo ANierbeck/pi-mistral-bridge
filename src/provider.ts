@@ -59,6 +59,7 @@ import {
   AcpClientError,
   classifyAcpError,
   VibeProcessPool,
+  debugLogFileName,
   defaultDebugLogDir,
   type AcpPrompt,
   type AcpSession,
@@ -359,7 +360,7 @@ export class MistralProvider {
     const logger = config.debug
       ? (line: string): void => {
           mkdirSync(logDir, { recursive: true });
-          appendFileSync(join(logDir, 'mcp-bridge.jsonl'), `${line}\n`);
+          appendFileSync(join(logDir, debugLogFileName('mcp-bridge')), `${line}\n`);
         }
       : undefined;
     const createBridge = this.options.createBridge ?? createMcpBridge;
