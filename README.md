@@ -93,6 +93,20 @@ Restart or `/reload` Pi afterwards.
    (for example: "use ask_vibe to …"), or invoke `ask_vibe` directly from the
    input line.
 
+## Commands
+
+Two slash commands make the bridge's state readable inside Pi:
+
+| Command | What it does |
+| --- | --- |
+| `/mistral-bridge.doctor` | One sanitized report: provider name, `vibe-acp` command, which config files exist (global and project), the effective timeouts plus the `ask_vibe` and debug state, the registered models with their Vibe aliases, the last discovery outcome, and a remediation hint when something is wrong. Never prints tokens or prompt content. |
+| `/mistral-bridge.models [refresh]` | Lists the registered models with their aliases; `refresh` runs a fresh discovery first (the same code path as the background refresh). |
+
+Warnings and anomalies are shown through Pi's UI (`ui.notify`) once a session
+is running, so they appear in the transcript rather than being written to the
+raw terminal; stderr is used only before `session_start`. In print/RPC mode
+(`hasUI: false`) command output goes to stdout.
+
 ## The two modes
 
 ### Provider mode
@@ -240,8 +254,12 @@ to anything under Vibe's own directory.
 
 ## Troubleshooting
 
+- **Start here**: `/mistral-bridge.doctor` prints the resolved config paths,
+  the effective knobs, the registered models and the last discovery outcome,
+  so it distinguishes "Vibe is not signed in" from "wrong config" from
+  "provider name collides" without reading logs.
 - **No `mistral-bridge` models in the picker**, or a `model discovery failed` /
-  `vibe-acp --setup` hint on stderr: Vibe is probably not signed in. Run
+  `vibe-acp --setup` hint: Vibe is probably not signed in. Run
   `vibe-acp --setup`, then `/reload` in Pi.
 - **Errors starting with `Mistral Vibe quota exceeded`**: Vibe surfaced a
   quota/429 or rate-limit error from Mistral (Vibe's ACP error code `-31001`

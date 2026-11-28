@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import {
   normalizeContext,
   type Api,
@@ -66,16 +66,23 @@ const MODEL: Model<Api> = {
 
 // ------------------------------------------------------------------- fake pi
 
+interface FakeCommand {
+  description?: string | undefined;
+  handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+}
+
 interface FakePi {
   pi: ExtensionAPI;
   registrations: Array<{ name: string; config: any }>;
   tools: Array<{ name: string; definition: any }>;
+  commands: Map<string, FakeCommand>;
   handlers: Map<string, (event: any, ctx: any) => unknown>;
 }
 
 function makeFakePi(): FakePi {
   const registrations: FakePi['registrations'] = [];
   const tools: FakePi['tools'] = [];
+  const commands: FakePi['commands'] = new Map();
   const handlers: FakePi['handlers'] = new Map();
   const pi = {
     registerProvider: (name: string, config: unknown) => {
@@ -84,12 +91,15 @@ function makeFakePi(): FakePi {
     registerTool: (definition: any) => {
       tools.push({ name: definition.name, definition });
     },
+    registerCommand: (name: string, options: FakeCommand) => {
+      commands.set(name, options);
+    },
     on: (event: string, handler: (event: any, ctx: any) => unknown) => {
       handlers.set(event, handler);
       return () => handlers.delete(event);
     },
   } as unknown as ExtensionAPI;
-  return { pi, registrations, tools, handlers };
+  return { pi, registrations, tools, commands, handlers };
 }
 
 async function waitFor(cond: () => boolean, label: string, timeoutMs = 4_000): Promise<void> {
@@ -486,6 +496,73 @@ describe('extension lifecycle wiring (session_start / session_shutdown)', () => 
         () => fake.children.every((c) => c.killedWith.length > 0),
         'all children killed'
       );
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  it('registers the diagnostics commands and reports the discovered models through the session UI', async () => {
+    const fake: FakeSpawnHarness = makeFakeSpawn({
+      modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
+    });
+    const { pi, registrations, handlers, commands } = makeFakePi();
+    const provider = registerMistralProvider(pi, CONFIG, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: () => {},
+    });
+    try {
+      await waitFor(() => registrations.length === 1, 'provider registration');
+      expect([...commands.keys()].sort()).toEqual([
+        'mistral-bridge.doctor',
+        'mistral-bridge.models',
+      ]);
+
+      const notes: Array<{ text: string; type: string | undefined }> = [];
+      const ctx = {
+        hasUI: true,
+        ui: { notify: (text: string, type?: string) => notes.push({ text, type }) },
+      } as unknown as ExtensionCommandContext;
+      await handlers.get('session_start')!({ type: 'session_start' }, ctx);
+
+      const doctor = commands.get('mistral-bridge.doctor');
+      if (!doctor) throw new Error('doctor command not registered');
+      await doctor.handler('', ctx);
+      expect(notes.at(-1)?.text).toContain('discovery: ok');
+      expect(notes.at(-1)?.text).toContain('api-id-one (Model One) → alias alias-one');
+      expect(notes.at(-1)?.type).toBe('info');
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  it('binds the warning notifier to the session context and clears it on shutdown', async () => {
+    const fake: FakeSpawnHarness = makeFakeSpawn();
+    const { pi, registrations, handlers } = makeFakePi();
+    const attached: unknown[] = [];
+    const notifier = {
+      attach: (session: unknown) => attached.push(session),
+      warn: () => {},
+    };
+    const provider = registerMistralProvider(pi, CONFIG, {
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onWarn: () => {},
+      notifier,
+    });
+    try {
+      await waitFor(() => registrations.length === 1, 'provider registration');
+      const ctx = {
+        hasUI: true,
+        ui: { notify: () => {} },
+      } as unknown as ExtensionCommandContext;
+      await handlers.get('session_start')!({ type: 'session_start' }, ctx);
+      expect(attached[0]).toEqual({ hasUI: true, ui: ctx.ui });
+
+      await handlers.get('session_shutdown')!({ type: 'session_shutdown' }, ctx);
+      expect(attached.at(-1)).toBeNull();
     } finally {
       await provider.dispose();
     }

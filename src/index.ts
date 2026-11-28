@@ -46,6 +46,8 @@ import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-age
 import { getBuiltinProviders } from '@earendil-works/pi-ai/providers/all';
 import { DEFAULT_PROVIDER_NAME, loadConfig, type BridgeConfig } from './config.ts';
 import type { SpawnChildFn } from './acp-client.ts';
+import { registerBridgeCommands } from './commands.ts';
+import { createSessionNotifier, type SessionNotifier } from './notify.ts';
 import { MistralProvider } from './provider.ts';
 import { registerAskVibeTool, type AskVibeManager, type RegisterAskVibeDeps } from './ask-vibe.ts';
 import { ModelCatalog, PI_BUILTIN_MISTRAL_PROVIDER } from './models.ts';
@@ -104,10 +106,20 @@ export interface RegisterMistralProviderDeps {
   spawnChild?: SpawnChildFn | undefined;
   /** Anomaly sink. */
   onAnomaly?: ((message: string) => void) | undefined;
-  /** Warning sink for discovery failures; defaults to stderr. */
+  /** Warning sink for discovery failures; defaults to the session notifier. */
   onWarn?: ((message: string) => void) | undefined;
   /** Debug log dir; defaults to `~/.pi/agent/logs/mistral-bridge/`. */
   logDir?: string | undefined;
+  /**
+   * Test injection: the warning channel. Defaults to a stderr→`ui.notify`
+   * notifier (src/notify.ts), so warnings stop painting over the TUI once the
+   * session context is known.
+   */
+  notifier?: SessionNotifier | undefined;
+  /** Home directory for the doctor report's config paths; defaults to `os.homedir()`. */
+  home?: string | undefined;
+  /** Headless sink for command output (print/RPC mode); defaults to stdout. */
+  commandWrite?: ((text: string) => void) | undefined;
 }
 
 /**
@@ -176,11 +188,13 @@ function registerProviderWithStartup(
   deps: RegisterMistralProviderDeps = {}
 ): RegisteredBridge {
   const cwd = deps.cwd ?? process.cwd();
+  // One warning channel (src/notify.ts): stderr until `session_start` provides
+  // the Pi context, `ctx.ui.notify` afterwards — a raw stderr write while the
+  // TUI renders paints over it.
+  const notifier = deps.notifier ?? createSessionNotifier();
   const warn: (message: string) => void =
-    deps.onWarn ??
-    ((message: string): void => {
-      process.stderr.write(`pi-mistral-bridge: ${message}\n`);
-    });
+    deps.onWarn ?? ((message: string): void => notifier.warn(message));
+  const anomaly = deps.onAnomaly ?? ((message: string): void => notifier.warn(message));
 
   // AGENTS.md §6: the bridge registers only its OWN provider; it must never
   // shadow any provider Pi already registers (registerProvider REPLACES the
@@ -200,10 +214,27 @@ function registerProviderWithStartup(
       config,
       cwd,
       spawnChild: deps.spawnChild,
-      onAnomaly: deps.onAnomaly,
+      onAnomaly: anomaly,
       logDir: deps.logDir,
     });
+    // The doctor still explains the state, and the models command points at it.
+    registerBridgeCommands(pi, {
+      config,
+      cwd,
+      home: deps.home,
+      catalog: null,
+      notRegisteredReason:
+        `"providerName" is "${config.providerName}", which collides with a provider Pi already ` +
+        `registers — nothing was registered (AGENTS.md §6); pick a unique name (default ` +
+        `"${DEFAULT_PROVIDER_NAME}") in mistral-bridge.json, then /reload`,
+      write: deps.commandWrite,
+    });
+    pi.on('session_start', (_event, ctx) => {
+      notifier.attach({ hasUI: ctx.hasUI, ui: ctx.ui });
+      void provider.openSession();
+    });
     pi.on('session_shutdown', () => {
+      notifier.attach(null);
       void provider.dispose();
     });
     return { provider, startupReady: Promise.resolve() };
@@ -216,7 +247,7 @@ function registerProviderWithStartup(
     config,
     cwd,
     spawnChild: deps.spawnChild,
-    onAnomaly: deps.onAnomaly,
+    onAnomaly: anomaly,
     logDir: deps.logDir,
     onUsageContextSize: (apiId, contextSize): void =>
       catalogRef.current?.noteContextSize(apiId, contextSize),
@@ -256,6 +287,14 @@ function registerProviderWithStartup(
   catalogRef.current = catalog;
   provider.onDispose(() => catalog.dispose());
   catalog.startRefresh();
+  // Diagnostics inside Pi (`/mistral-bridge.doctor`, `/mistral-bridge.models`).
+  registerBridgeCommands(pi, {
+    config,
+    cwd,
+    home: deps.home,
+    catalog,
+    write: deps.commandWrite,
+  });
 
   // First discovery (ADR-0005): kicked off at load and awaited by the async
   // extension factory (bounded by `startupDiscoveryTimeoutMs`, see
@@ -284,10 +323,12 @@ function registerProviderWithStartup(
   })();
   const startupReady = awaitFirstDiscovery(firstDiscovery, config, warn);
 
-  pi.on('session_start', () => {
+  pi.on('session_start', (_event, ctx) => {
+    notifier.attach({ hasUI: ctx.hasUI, ui: ctx.ui });
     void provider.openSession();
   });
   pi.on('session_shutdown', () => {
+    notifier.attach(null);
     void provider.dispose();
   });
   return { provider, startupReady };
@@ -332,8 +373,21 @@ export function wireExtension(
   config: BridgeConfig,
   deps: WireExtensionDeps = {}
 ): WiredExtension {
-  const { provider, startupReady } = registerProviderWithStartup(pi, config, deps);
-  const askVibe = config.askVibe.enabled ? registerAskVibeTool(pi, config, deps) : null;
+  // One notifier for both runtimes: the AskVibe pool's anomalies must also
+  // stop going to stderr once the session context is known (src/notify.ts).
+  const notifier = deps.notifier ?? createSessionNotifier();
+  const { provider, startupReady } = registerProviderWithStartup(pi, config, {
+    ...deps,
+    notifier,
+  });
+  const askVibe = config.askVibe.enabled
+    ? registerAskVibeTool(pi, config, {
+        cwd: deps.cwd,
+        spawnChild: deps.spawnChild,
+        onAnomaly: deps.onAnomaly ?? ((message: string): void => notifier.warn(message)),
+        logDir: deps.logDir,
+      })
+    : null;
   return { provider, askVibe, startupReady };
 }
 

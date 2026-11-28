@@ -8,6 +8,20 @@ Semantic Versioning.
 
 ### Added
 
+- `/mistral-bridge.doctor` renders one sanitized diagnostic report inside Pi:
+  provider name, `vibe-acp` command, which config files exist, the effective
+  timeouts and `ask_vibe`/debug state, the registered models with their Vibe
+  aliases, the last discovery outcome and a remediation hint (no token, prompt
+  or transcript content). `/mistral-bridge.models [refresh]` lists the models,
+  and `refresh` forces a new discovery. Both explain a provider-name collision
+  instead of printing an empty list, and write to `ui.notify` in TUI/RPC mode
+  and to stdout when there is no UI.
+- Warnings and anomalies go through `ctx.ui.notify` once a session starts
+  (`src/notify.ts`), so they show up in the transcript instead of being written
+  to the raw terminal and painting over the TUI; stderr is used only before
+  `session_start`. One notifier is shared by the provider and the AskVibe pool.
+- `ModelCatalog.lastDiscovery` records the outcome of the most recent discovery
+  (initial or background refresh) for the doctor.
 - Provider mode reports a Vibe rate limit to Pi through the `onResponse`
   stream option: status `429` with empty headers, once per failed attempt and
   before the terminal error event. No `retry-after` is sent because Vibe gives
@@ -17,6 +31,22 @@ Semantic Versioning.
 - Quota errors are classified by Vibe's ACP error code `-31001` first, so
   rewording of the rate-limit message no longer hides them; the text match
   stays as the fallback.
+
+### Fixed
+
+- A timer config value (`toolPreTimeoutMs`, `abortWatchdogMs`,
+  `discoveryTimeoutMs`, `startupDiscoveryTimeoutMs`, `processIdleTimeoutMs`,
+  `modelRefreshIntervalMs`) above Node's 32-bit timer limit (2147483647 ms) is
+  now a config error instead of overflowing to 1 ms and turning every call or
+  the refresh loop into a hot loop.
+- Config errors for an out-of-range number now show the offending value in the
+  message instead of `[object Object]`-style junk; positives also require a
+  finite value.
+- `VIBE_ENABLED_TOOLS` globs are built from Vibe's normalized server name
+  (`[^A-Za-z0-9-]` → `_`), matching the name Vibe publishes for `pi__` tools;
+  a non-default `providerName` (for example `pi.bridge`) no longer produces a
+  glob that matches nothing and policy-denies every Pi tool without a
+  permission request.
 
 ## 0.1.3 - 2026-11-27
 

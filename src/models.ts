@@ -247,6 +247,27 @@ export interface ModelCatalogOptions {
     | undefined;
 }
 
+/** One-line description of a thrown value (never `[object Object]`). */
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error) ?? 'unknown error';
+  } catch {
+    return 'unknown error';
+  }
+}
+/** Outcome of the most recent discovery run (initial or background), for the doctor command. */
+export interface DiscoveryOutcome {
+  ok: boolean;
+  /** Epoch ms of the attempt. */
+  at: number;
+  /** Classified failure message when `ok` is false. */
+  error?: string | undefined;
+  /** Model count the catalog held after the attempt. */
+  modelCount: number;
+}
+
 /**
  * The model catalog: owns the discovered model list, the alias map (API id →
  * alias, the pool routing key, ADR-0007) and the per-API-id capability cache;
@@ -266,6 +287,7 @@ export class ModelCatalog {
   private timer: NodeJS.Timeout | null = null;
   private discoveryInFlight: Promise<DiscoveredModel[]> | null = null;
   private disposed = false;
+  private lastOutcome: DiscoveryOutcome | null = null;
 
   constructor(options: ModelCatalogOptions) {
     this.options = options;
@@ -281,6 +303,14 @@ export class ModelCatalog {
   /** API model id → Vibe alias (the process-pool key, ADR-0007). */
   get aliasMap(): ReadonlyMap<string, string> {
     return this.aliasByApiId;
+  }
+
+  /**
+   * Outcome of the most recent discovery attempt (initial or background), or
+   * null before the first one settled. Read by `/mistral-bridge.doctor`.
+   */
+  get lastDiscovery(): DiscoveryOutcome | null {
+    return this.lastOutcome;
   }
 
   /**
@@ -301,12 +331,18 @@ export class ModelCatalog {
    * non-empty list.
    */
   async discover(): Promise<readonly ProviderModelConfig[]> {
-    const discovered = await this.runDiscovery();
-    if (discovered.length === 0) {
-      throw new Error(`the 'model' config option of session/new listed no models`);
+    try {
+      const discovered = await this.runDiscovery();
+      if (discovered.length === 0) {
+        throw new Error(`the 'model' config option of session/new listed no models`);
+      }
+      this.applyDiscovered(discovered);
+      this.recordDiscovery(null);
+      return this.currentModels;
+    } catch (error) {
+      this.recordDiscovery(error);
+      throw error;
     }
-    this.applyDiscovered(discovered);
-    return this.currentModels;
   }
 
   /**
@@ -322,13 +358,25 @@ export class ModelCatalog {
         throw new Error(`the 'model' config option of session/new listed no models`);
       }
       this.applyDiscovered(discovered);
+      this.recordDiscovery(null);
     } catch (error) {
+      this.recordDiscovery(error);
       if (!this.disposed) {
         this.onAnomaly?.(
           `model refresh failed — keeping the previous model list (${String(error)})`
         );
       }
     }
+  }
+
+  /** Records one attempt for {@link lastDiscovery} (`error` null = success). */
+  private recordDiscovery(error: unknown): void {
+    this.lastOutcome = {
+      ok: error === null,
+      at: Date.now(),
+      error: error === null ? undefined : describeError(error),
+      modelCount: this.modelsValue.length,
+    };
   }
 
   /** Starts the background refresh timer (`config.modelRefreshIntervalMs`, unref'd). */

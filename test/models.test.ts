@@ -371,6 +371,29 @@ describe('ModelCatalog background refresh (ADR-0007: aliases volatile, re-read t
     }
   });
 
+  it('records the last discovery outcome for the doctor command', async () => {
+    const fake = makeFakeSpawn({
+      modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
+    });
+    const { catalog } = makeCatalog(fake);
+    try {
+      expect(catalog.lastDiscovery).toBeNull();
+
+      await catalog.discover();
+      expect(catalog.lastDiscovery?.ok).toBe(true);
+      expect(catalog.lastDiscovery?.modelCount).toBe(1);
+      expect(catalog.lastDiscovery?.error).toBeUndefined();
+
+      fake.behavior.failInitialize = true; // every later spawn fails the handshake
+      await catalog.refresh();
+      expect(catalog.lastDiscovery?.ok).toBe(false);
+      expect(catalog.lastDiscovery?.error).toBeTruthy();
+      expect(catalog.lastDiscovery?.modelCount).toBe(1); // the old list was kept
+    } finally {
+      catalog.dispose();
+    }
+  });
+
   it('an empty refresh result does not wipe a non-empty list', async () => {
     const fake = makeFakeSpawn({
       modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
@@ -450,6 +473,7 @@ function makeFakePi(): FakePi {
       registrations.push({ name, config });
     },
     registerTool: () => {},
+    registerCommand: () => {},
     on: (event: string, handler: (event: any, ctx: any) => unknown) => {
       handlers.set(event, handler);
       return () => handlers.delete(event);
