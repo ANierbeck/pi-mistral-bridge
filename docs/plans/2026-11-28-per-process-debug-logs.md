@@ -22,7 +22,8 @@
   debug-off default are unchanged (§15).
 - **Open decisions:** none. Old shared files are left alone (the bridge never
   deletes user files); README documents the new names.
-- **Verified against:** `main` @ 71c9e90. File names checked in
+- **Verified against:** `main` @ 71c9e90 (`src/` unchanged through b9f27ad:
+  `git diff 71c9e90 b9f27ad --stat -- src` is empty). File names checked in
   `src/acp-client.ts` (`AcpDebugLog` builds `${fileBase}.jsonl`; the pool
   passes `vibe-acp-${alias}-${++spawnCounter}`), `src/models.ts`
   (`logFileBase: 'model-discovery'`) and `src/provider.ts`

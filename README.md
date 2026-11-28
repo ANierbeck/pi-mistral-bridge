@@ -262,6 +262,8 @@ to anything under Vibe's own directory.
   `model-discovery-<pid>.jsonl` (model discovery) and
   `vibe-acp-<alias>-<pid>-<n>.jsonl` (raw ACP traffic of the `<n>`-th
   `vibe-acp` process that Pi process spawned for `<alias>`).
+  The bridge never deletes log files, so while `debug` is on the log
+  directory grows with every Pi process; remove old files by hand.
 
 ## Development
 

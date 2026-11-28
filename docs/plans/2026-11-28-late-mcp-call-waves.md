@@ -28,7 +28,9 @@
   parked prompt can be identified unambiguously (none, or more than one), the
   current behaviour stays: anomaly + drop, answered by the timeout.
 - **Open decisions:** none.
-- **Verified against:** `main` @ 71c9e90, `vibe-acp` 3.1.4, pi 1.7.0. Code
+- **Verified against:** `main` @ 71c9e90 (`src/` unchanged through b9f27ad:
+  `git diff 71c9e90 b9f27ad --stat -- src` is empty), `vibe-acp` 3.1.4, pi
+  1.7.0. Code
   claims checked in `src/provider.ts` (`onBatch`, the `continueToolResults`
   branch of `runTurn`, `LiveTurn`), `src/mcp-bridge.ts` (`queueForBatch`,
   `deliverResults`, `newTurn`, `releaseParked`) and `src/session-map.ts`
@@ -69,6 +71,14 @@
 6. Abandon paths need no extra code: `startRebuild` deletes the live turn and
    `releaseParked` answers every pending call including late ones; the
    `lateCalls` array dies with the `LiveTurn`.
+
+## Known limits
+
+After a steering rebuild Vibe may retry a call it had cancelled from the
+abandoned prompt. With exactly one parked prompt such a retry is now queued
+and emitted to Pi as a real tool call instead of being dropped. This is
+pre-existing in kind (the open-stream branch of `onBatch` had the same
+exposure) and unlikely, because the old ACP session is closed by the rebuild.
 
 ## Tasks
 

@@ -878,10 +878,15 @@ export class MistralProvider {
 
   /**
    * Emits parked MCP calls as Pi toolCall blocks on the live turn's open
-   * stream and ends it with `toolUse` (the ACP prompt stays parked).
+   * stream and ends it with `toolUse` (the ACP prompt stays parked). The
+   * turn's stream must still be open; an ended one is never touched.
    */
   private emitBatch(live: LiveTurn, calls: readonly ParkedCall[]): void {
     const turn = live.current;
+    if (turn.ended) {
+      this.anomaly('emitBatch on an ended stream — dropped');
+      return;
+    }
     this.closeText(live);
     this.closeThinking(live);
     live.state.pendingToolBatch = calls;
