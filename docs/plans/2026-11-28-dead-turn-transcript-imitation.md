@@ -1,6 +1,7 @@
 # Dead-turn detection for transcript-format imitation
 
-- **Status:** in progress — owner approved 2026-11-28 ("Ja, baue eine fix-Branch mit Plan usw.")
+- **Status:** done — 2026-11-28 (red-first: 3 detection tests red against the
+  unfixed detector, then green; all gates green, see Tasks)
 - **Problem:** After a Pi compaction the bridge rebuilds the Vibe session and the
   model's context becomes the bridge's rendered transcript
   (`--- past tool call pi__<name> --- ... --- end past tool result ... ---`) plus
@@ -59,14 +60,20 @@
    - healthy text without markers, and a marker embedded mid-line
      (not line-initial) → not dead.
    The red evidence (failing test output) is quoted in the report (§4).
+   **Done:** describe `findImitatedToolCallText: fabricated transcript markers
+   (dead-turn detection, ADR-0010)`; red evidence: 3 failed / 2 passed against
+   the unfixed detector.
 2. **Implementation** in `src/transcript.ts`: add
    `IMITATED_TRANSCRIPT_MARKER_PATTERN`
    (`/^[ \t]*(?:>[ \t]*)*--- past tool (?:call|result) pi__[A-Za-z0-9_.-]+/m`)
    next to `IMITATED_TOOL_CALL_TEXT_PATTERN`, extend
    `findImitatedToolCallText` to test both patterns, update its doc comment.
+   **Done:** as specified; real-toolCall guard kept.
 3. **Gates:** `npx tsc --noEmit`, `npm run lint`, `npm run format:check`,
    `npx vitest run`, `npm run test:coverage` with coverage thresholds
    unchanged (§4 floors are never lowered).
+   **Done:** tsc/lint/format:check exit 0, vitest 339/339, coverage
+   93.03/84.9/88.35/95.11 (transcript.ts 97.14/96.34/100/97.61).
 
 ## Constraints for the implementer
 
