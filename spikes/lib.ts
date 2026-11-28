@@ -77,6 +77,17 @@ export async function startMcpServer(opts: { token: string; slowMs: number; log:
         return { content: [{ type: "text", text }] };
       },
     );
+    // Synthetic note store for the catch-up spike (spikes/catch-up-paid.ts): the answer can only come from the tool.
+    server.registerTool(
+      "pi__read_note",
+      { description: "Read a short synthetic note by its key.", inputSchema: { key: z.string() } },
+      async ({ key }) => {
+        const text = `note ${key}: the vault code word is ORCHID-${key.length * 7}`;
+        log.write({ ev: "tool_exec_start", tool: "pi__read_note", key });
+        log.write({ ev: "tool_exec_end", tool: "pi__read_note", key });
+        return { content: [{ type: "text", text }] };
+      },
+    );
     server.registerTool(
       "pi__slow_echo",
       { description: `Echo the given text back after a ${slowMs} ms delay.`, inputSchema: { text: z.string() } },
