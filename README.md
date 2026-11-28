@@ -235,7 +235,7 @@ to anything under Vibe's own directory.
   evidence and wire traces in
   [docs/research/2026-11-24-vibe-acp-surface.md](docs/research/2026-11-24-vibe-acp-surface.md).
   Behaviour of other Vibe versions is unverified.
-- Pi 1.6.0, `@agentclientprotocol/sdk` 2.9.1, `@modelcontextprotocol/sdk`
+- Pi 1.7.0, `@agentclientprotocol/sdk` 2.9.1, `@modelcontextprotocol/sdk`
   1.32.2, Node.js >= 22.19.
 
 ## Troubleshooting
