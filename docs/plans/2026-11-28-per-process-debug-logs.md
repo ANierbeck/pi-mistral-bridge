@@ -1,7 +1,7 @@
 # Per-process debug log files
 
-- **Status:** approved — 2026-11-28 (owner go in chat for the late-wave fix
-  round; this defect was found while analysing those logs, §7)
+- **Status:** done — 2026-11-28 (red-first: the name tests red against the
+  shared names; all gates green; fix commit 753ea1e)
 - **Problem:** With `debug: true` every Pi process that loads the bridge
   writes to the same file names under `~/.pi/agent/logs/mistral-bridge/`:
   `mcp-bridge.jsonl` (`src/provider.ts`), `model-discovery.jsonl`
@@ -31,12 +31,14 @@
 
 ## Tasks
 
-- [ ] T1 (red) — tests that pin the new names: `AcpDebugLog`/pool file name
+- [x] T1 (red) — tests that pin the new names: `AcpDebugLog`/pool file name
   contains the pid; the provider's bridge logger writes
   `mcp-bridge-<pid>.jsonl`; model discovery writes
   `model-discovery-<pid>.jsonl`. Observed RED against the current names.
-- [ ] T2 — one exported helper (e.g. `debugLogFileName(base, pid)` in
+- [x] T2 — one exported helper (e.g. `debugLogFileName(base, pid)` in
   `src/acp-client.ts` next to `defaultDebugLogDir`) used by all three
-  writers; pid injectable for tests, default `process.pid`.
-- [ ] T3 — README debug-log section names the new pattern.
-- [ ] T4 — gates as in AGENTS.md §4; CHANGELOG `## Unreleased` (Fixed).
+  writers; pid injectable for tests, default `process.pid`. As built:
+  `debugLogFileName(base, pid, sequence?)`; the pool passes its spawn counter
+  as `sequence` so the name keeps the `<alias>-<pid>-<n>` order.
+- [x] T3 — README debug-log section names the new pattern.
+- [x] T4 — gates as in AGENTS.md §4; CHANGELOG `## Unreleased` (Fixed).

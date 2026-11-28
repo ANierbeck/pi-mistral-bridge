@@ -1,7 +1,7 @@
 # Late MCP call waves while a tool batch is parked
 
-- **Status:** approved — 2026-11-28 (owner go in chat: "schreibe den Plan …
-  dann können wir es umsetzen")
+- **Status:** done — 2026-11-28 (red-first: T1, T2, T4 red against the
+  unfixed code, T3 a pin; 347 tests, all gates green; fix commit 9532e7a)
 - **Problem:** Vibe sometimes issues the parallel tool calls of one model
   step in more than one wave. The MCP bridge groups calls that arrive within
   `DEFAULT_BATCH_WINDOW_MS` (100 ms, `src/mcp-bridge.ts`) into one batch;
@@ -72,21 +72,21 @@
 
 ## Tasks
 
-- [ ] T1 (red) — `test/provider.test.ts`: a fake-ACP prompt parks call A;
+- [x] T1 (red) — `test/provider.test.ts`: a fake-ACP prompt parks call A;
   the provider emits batch A (`toolUse`); before Pi answers, call B parks
   (second wave). Assert: no anomaly reported; the next `streamSimple` with
   A's result ends with `toolUse` carrying B's `toolCall`; answering B lets
   the prompt finish and Vibe received both results. Observed RED against the
   unfixed provider (anomaly "dropped", B never surfaced).
-- [ ] T2 (red) — a late call that the bridge timed out before Pi answered
+- [x] T2 (red) — a late call that the bridge timed out before Pi answered
   the first batch is not emitted (`isPending` false); the turn continues
   normally.
-- [ ] T3 — existing behaviour pinned: a batch with no parked prompt still
+- [x] T3 — existing behaviour pinned: a batch with no parked prompt still
   reports the anomaly and drops (keep or adapt the existing test).
-- [ ] T4 (red) — `test/mcp-bridge.test.ts`: `isPending` true while parked,
+- [x] T4 (red) — `test/mcp-bridge.test.ts`: `isPending` true while parked,
   false after `deliverResults`, timeout and `releaseParked`.
-- [ ] T5 — implement steps 1–5; update the `onBatch` doc comment and the
+- [x] T5 — implement steps 1–5; update the `onBatch` doc comment and the
   module doc of `src/provider.ts`.
-- [ ] T6 — gates: `npx tsc --noEmit`, `npm run lint`, `npm run format:check`,
+- [x] T6 — gates: `npx tsc --noEmit`, `npm run lint`, `npm run format:check`,
   `npx vitest run`, `npm run test:coverage` (thresholds unchanged).
-- [ ] T7 — CHANGELOG `## Unreleased` entry (Fixed).
+- [x] T7 — CHANGELOG `## Unreleased` entry (Fixed).
