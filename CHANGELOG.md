@@ -6,6 +6,8 @@ Semantic Versioning.
 
 ## Unreleased
 
+## 0.1.4 - 2026-11-28
+
 ### Added
 
 - Provider mode reports a Vibe rate limit to Pi through the `onResponse`
@@ -42,6 +44,14 @@ Semantic Versioning.
   batch right after Pi's results for the first batch are delivered; a call
   the bridge already timed out is skipped. With more than one parked prompt
   the call cannot be attributed and is still dropped.
+- A response that continues the rebuild transcript as plain text (fabricated
+  `--- past tool call pi__<name> ---` / `--- past tool result pi__<name> ---`
+  markers with no real tool call) is now recognised as a dead turn: the
+  bridge sends its one corrective prompt (ADR-0010) and, if it happens
+  again, ends the turn as an error instead of stopping silently with
+  fabricated tool output. Seen after compactions on a large model. A
+  tool-less answer that quotes such a marker at the start of a line costs one
+  corrective turn (ADR-0012).
 
 ## 0.1.3 - 2026-11-27
 

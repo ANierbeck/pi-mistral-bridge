@@ -23,8 +23,9 @@ ADRs record architecture decisions as they were made. Rules (AGENTS.md §12):
 | [0007](0007-process-model-and-env-based-configuration.md) | One process per model; configuration via process env | Accepted | — |
 | [0008](0008-implementation-deviations.md) | Implementation-round deviations accepted as amendments to ADR-0003/0004/0005 | Accepted | — |
 | [0009](0009-provider-name-default-mistral-bridge.md) | Default provider name `mistral-bridge` (amends ADR-0002) | Accepted | — |
-| [0010](0010-bridge-failure-feedback.md) | Bridge failure feedback contract (dead-turn detection, one corrective retry, `mistral-bridge:` prefix) | Accepted | — |
+| [0010](0010-bridge-failure-feedback.md) | Bridge failure feedback contract (dead-turn detection, one corrective retry, `mistral-bridge:` prefix) | Accepted | Partially amended by [0012](0012-dead-turn-detector-recognises-transcript-markers.md) (detector also recognises fabricated transcript markers) |
 | [0011](0011-provider-mode-read-file-builtin.md) | Provider mode: enable Vibe's read-only `read_file` builtin (amends ADR-0006) | Accepted | — |
+| [0012](0012-dead-turn-detector-recognises-transcript-markers.md) | Dead-turn detector also recognises fabricated transcript markers (extends ADR-0010) | Accepted | — |
 
 ## Template
 
