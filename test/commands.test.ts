@@ -16,9 +16,12 @@ import {
   formatModelList,
   MAX_MODELS_IN_REPORT,
   registerBridgeCommands,
+  safeDiagnosticText,
   type CommandCatalog,
+  type DiagnosticsModel,
 } from '../src/commands.ts';
 import type { BridgeConfig } from '../src/config.ts';
+import type { DiscoveryOutcome } from '../src/models.ts';
 import { createSessionNotifier } from '../src/notify.ts';
 
 const CWD = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-cmd-cwd-'));
@@ -82,33 +85,59 @@ function makeCtx(hasUI: boolean): UiHarness {
   return { ctx, notes };
 }
 
-interface FakeCatalog extends CommandCatalog {
-  discoverCalls: number;
-  failDiscover: string | null;
+interface FakeCatalogOptions {
+  models?: DiagnosticsModel[] | undefined;
+  aliasMap?: Map<string, string> | undefined;
+  lastDiscovery?: DiscoveryOutcome | null | undefined;
+  isDisposed?: boolean | undefined;
 }
 
-function makeCatalog(overrides: Partial<CommandCatalog> = {}): FakeCatalog {
-  const catalog: FakeCatalog = {
-    currentModels: [
+/** Mutable fake of the catalog slice (the interface fields are readonly). */
+class FakeCatalog implements CommandCatalog {
+  currentModels: DiagnosticsModel[];
+  aliasMap: Map<string, string>;
+  lastDiscovery: DiscoveryOutcome | null;
+  isDisposed: boolean;
+  discoverCalls = 0;
+  failDiscover: string | null = null;
+  /** Set when the next discovery should settle after the catalog was disposed. */
+  disposeOnDiscover = false;
+  /** Set to make the next discovery publish this list. */
+  nextModels: DiagnosticsModel[] | null = null;
+
+  constructor(options: FakeCatalogOptions = {}) {
+    this.currentModels = options.models ?? [
       { id: 'api-one', name: 'Model One' },
       { id: 'api-two', name: 'Model Two' },
-    ],
-    aliasMap: new Map([
-      ['api-one', 'alias-one'],
-      ['api-two', 'alias-two'],
-    ]),
-    lastDiscovery: null,
-    isDisposed: false,
-    discoverCalls: 0,
-    failDiscover: null,
-    discover: async () => {
-      catalog.discoverCalls += 1;
-      if (catalog.failDiscover !== null) throw new Error(catalog.failDiscover);
-      return [];
-    },
-    ...overrides,
-  };
-  return catalog;
+    ];
+    this.aliasMap =
+      options.aliasMap ??
+      new Map([
+        ['api-one', 'alias-one'],
+        ['api-two', 'alias-two'],
+      ]);
+    this.lastDiscovery = options.lastDiscovery ?? null;
+    this.isDisposed = options.isDisposed ?? false;
+  }
+
+  async discover(): Promise<readonly unknown[]> {
+    this.discoverCalls += 1;
+    if (this.disposeOnDiscover) {
+      this.isDisposed = true;
+      throw new Error('discovery aborted by dispose');
+    }
+    if (this.failDiscover !== null) throw new Error(this.failDiscover);
+    if (this.nextModels !== null) {
+      this.currentModels = this.nextModels;
+      this.aliasMap = new Map(this.nextModels.map((model) => [model.id, `alias-${model.id}`]));
+      this.nextModels = null;
+    }
+    return this.currentModels;
+  }
+}
+
+function makeCatalog(options: FakeCatalogOptions = {}): FakeCatalog {
+  return new FakeCatalog(options);
 }
 
 // ---------------------------------------------------------------- report
@@ -152,9 +181,10 @@ describe('formatDoctorReport', () => {
     expect(report).toContain('pi-mistral-bridge doctor');
     expect(report).toContain('provider: mistral-bridge');
     expect(report).toContain('vibe-acp: vibe-acp');
-    expect(report).toContain(join(HOME, '.pi', 'agent', 'mistral-bridge.json'));
-    expect(report).toContain(join(CWD, '.pi', 'mistral-bridge.json'));
-    expect(report).toContain('(absent)');
+    const globalConfig = join(HOME, '.pi', 'agent', 'mistral-bridge.json');
+    const projectConfig = join(CWD, '.pi', 'mistral-bridge.json');
+    expect(report).toContain(`${globalConfig} (absent)`);
+    expect(report).toContain(`${projectConfig} (absent)`);
     expect(report).toContain('ask_vibe: enabled (default mode ask, autoApprove off)');
     expect(report).toContain('debug log: off');
     expect(report).toContain('discovery: ok 5 s ago — 2 model(s) registered');
@@ -216,6 +246,50 @@ describe('formatDoctorReport', () => {
       now: NOW,
     });
     expect(report).toContain('hint: collides with a provider Pi already registers');
+  });
+
+  it('still hints at a failed refresh when older models remain registered', () => {
+    const report = formatDoctorReport({
+      config: CONFIG,
+      cwd: CWD,
+      home: HOME,
+      models: [{ id: 'api-one', name: 'Model One' }],
+      aliasByApiId: new Map(),
+      discovery: { ok: false, at: NOW, error: 'refresh blew up', modelCount: 1 },
+      nodeVersion: 'v22.19.0',
+      now: NOW,
+    });
+    expect(report).toContain('models: 1 registered');
+    expect(report).toContain('hint: the last discovery failed');
+    expect(report).toContain('stay registered until a refresh succeeds');
+  });
+
+  it('reports the startup-discovery and refresh timings', () => {
+    const report = formatDoctorReport({
+      config: CONFIG,
+      cwd: CWD,
+      home: HOME,
+      models: [],
+      aliasByApiId: new Map(),
+      discovery: null,
+      nodeVersion: 'v22.19.0',
+      now: NOW,
+    });
+    expect(report).toContain(`startup ${CONFIG.startupDiscoveryTimeoutMs} ms`);
+    expect(report).toContain(`refresh ${CONFIG.modelRefreshIntervalMs} ms`);
+  });
+});
+
+describe('safeDiagnosticText', () => {
+  it('strips terminal escapes and control characters', () => {
+    const text = safeDiagnosticText('a\u001b[31mred\u001b[0m b\u0007c\nd');
+    expect(text).toBe('ared b?c\nd');
+  });
+
+  it('redacts bearer tokens', () => {
+    expect(safeDiagnosticText('Authorization: Bearer abc.def-123')).toBe(
+      'Authorization: Bearer <redacted>'
+    );
   });
 });
 
@@ -316,12 +390,56 @@ describe('registerBridgeCommands', () => {
     expect(catalog.discoverCalls).toBe(1);
     expect(written.at(-1)).toContain('2 model(s):');
 
+    // the refreshed list is what gets printed, not the pre-discovery one
+    catalog.nextModels = [{ id: 'api-fresh', name: 'Fresh' }];
+    await models('refresh', makeCtx(false).ctx);
+    expect(catalog.discoverCalls).toBe(2);
+    expect(written.at(-1)).toContain('api-fresh');
+    expect(written.at(-1)).not.toContain('api-one');
+
     catalog.failDiscover = 'discovery exploded';
     const withUi = makeCtx(true);
     await models('refresh', withUi.ctx);
-    expect(catalog.discoverCalls).toBe(2);
+    expect(catalog.discoverCalls).toBe(3);
     expect(withUi.notes.at(-1)?.text).toContain('discovery exploded');
     expect(withUi.notes.at(-1)?.type).toBe('error');
+  });
+
+  it('treats a discovery aborted by shutdown as a warning, not a failure', async () => {
+    const fake = makeFakePi();
+    const catalog = makeCatalog();
+    catalog.disposeOnDiscover = true;
+    const withUi = makeCtx(true);
+    registerBridgeCommands(fake.pi, {
+      config: CONFIG,
+      cwd: CWD,
+      home: HOME,
+      catalog,
+      write: () => {},
+    });
+    const models = fake.commands.get(MODELS_COMMAND)?.handler;
+    if (!models) throw new Error('models command not registered');
+    await models('--refresh', withUi.ctx);
+    expect(withUi.notes.at(-1)?.text).toContain('shutting down');
+    expect(withUi.notes.at(-1)?.type).toBe('warning');
+  });
+
+  it('sanitizes untrusted fields on the headless channel', async () => {
+    const fake = makeFakePi();
+    const written: string[] = [];
+    const catalog = makeCatalog({ models: [{ id: 'api\u001b[31mx', name: 'N\u0007ame' }] });
+    registerBridgeCommands(fake.pi, {
+      config: CONFIG,
+      cwd: CWD,
+      home: HOME,
+      catalog,
+      write: (text) => written.push(text),
+    });
+    const models = fake.commands.get(MODELS_COMMAND)?.handler;
+    if (!models) throw new Error('models command not registered');
+    await models('', makeCtx(false).ctx);
+    expect(written.at(-1)).not.toContain('\u001b');
+    expect(written.at(-1)).not.toContain('\u0007');
   });
 
   it('models refuses to refresh a disposed catalog', async () => {

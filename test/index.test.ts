@@ -537,6 +537,40 @@ describe('extension lifecycle wiring (session_start / session_shutdown)', () => 
     }
   });
 
+  it('routes background refresh failures to the session UI', async () => {
+    const fake: FakeSpawnHarness = makeFakeSpawn({
+      modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
+    });
+    const { pi, registrations, handlers } = makeFakePi();
+    const provider = registerMistralProvider(
+      pi,
+      { ...CONFIG, modelRefreshIntervalMs: 25 },
+      {
+        cwd: CWD,
+        spawnChild: fake.spawnChild,
+        logDir: LOG_DIR,
+        onWarn: () => {},
+      }
+    );
+    try {
+      await waitFor(() => registrations.length === 1, 'provider registration');
+      const notes: string[] = [];
+      const ctx = {
+        hasUI: true,
+        ui: { notify: (text: string) => notes.push(text) },
+      } as unknown as ExtensionCommandContext;
+      await handlers.get('session_start')!({ type: 'session_start' }, ctx);
+
+      fake.behavior.failInitialize = true; // every later spawn fails the handshake
+      await waitFor(
+        () => notes.some((note) => note.includes('model refresh failed')),
+        'refresh anomaly in the UI'
+      );
+    } finally {
+      await provider.dispose();
+    }
+  });
+
   it('binds the warning notifier to the session context and clears it on shutdown', async () => {
     const fake: FakeSpawnHarness = makeFakeSpawn();
     const { pi, registrations, handlers } = makeFakePi();

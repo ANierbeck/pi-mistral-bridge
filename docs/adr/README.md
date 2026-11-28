@@ -24,6 +24,7 @@ ADRs record architecture decisions as they were made. Rules (AGENTS.md §12):
 | [0008](0008-implementation-deviations.md) | Implementation-round deviations accepted as amendments to ADR-0003/0004/0005 | Accepted | — |
 | [0009](0009-provider-name-default-mistral-bridge.md) | Default provider name `mistral-bridge` (amends ADR-0002) | Accepted | — |
 | [0010](0010-bridge-failure-feedback.md) | Bridge failure feedback contract (dead-turn detection, one corrective retry, `mistral-bridge:` prefix) | Accepted | — |
+| [0011](0011-diagnostics-commands-and-warning-routing.md) | Diagnostics commands and warning routing (`/mistral-bridge.doctor`, `/mistral-bridge.models`, session notifier) | Proposed | — |
 
 ## Template
 

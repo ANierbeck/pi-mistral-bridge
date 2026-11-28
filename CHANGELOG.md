@@ -65,6 +65,19 @@ Semantic Versioning.
 - `ask_vibe` no longer reports the requested mode as `vibeModeId` when the
   session advertised no modes and nothing was set; it reports the session's
   current mode (`modes.currentModeId`) or `unknown`.
+- Command output is sanitized on both channels: terminal escape and control
+  characters from config values, model names and discovery errors are
+  neutralized, and `Bearer` values are redacted before printing.
+- The doctor report includes the startup-discovery timeout and the model-refresh
+  interval, and a failed discovery now carries its remediation hint even when
+  older models remain registered.
+- A refresh aborted by session shutdown is reported as a shutdown warning, not
+  as a discovery failure, and `lastDiscovery` is not overwritten by that abort.
+- A background discovery failure now reaches the session UI: `ModelCatalog` gets
+  the notifier-backed anomaly sink instead of only the injected callback.
+- A discovery result is published to Pi before the catalog commits it, so a
+  throwing publication (`registerProvider`) is retried on the next discovery
+  instead of leaving Pi with a list the catalog believes it published.
 
 ## 0.1.3 - 2026-11-27
 

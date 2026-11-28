@@ -17,6 +17,7 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import {
   GLOBAL_CONFIG_PATH_PARTS,
@@ -107,13 +108,17 @@ export function configFileStates(
 /** Remediation hint for the current state (empty when everything looks fine). */
 function doctorHint(input: DoctorReportInput): string | null {
   if (input.notRegisteredReason !== undefined) return input.notRegisteredReason;
-  if (input.models.length > 0) return null;
-  const discovery = input.discovery;
-  if (discovery === null) {
-    return 'no models yet — if this persists run `vibe-acp --setup`, then /reload';
+  if (input.discovery !== null && !input.discovery.ok) {
+    return (
+      'the last discovery failed — check `vibe-acp --setup` and the error above, then /reload' +
+      (input.models.length > 0
+        ? ' (the previously discovered models stay registered until a refresh succeeds)'
+        : ' (no models are registered)')
+    );
   }
-  if (!discovery.ok) {
-    return 'discovery failed — check `vibe-acp --setup` and the error above, then /reload';
+  if (input.models.length > 0) return null;
+  if (input.discovery === null) {
+    return 'no models yet — if this persists run `vibe-acp --setup`, then /reload';
   }
   return 'discovery reported no models — check the Vibe account/plan and run /reload';
 }
@@ -138,7 +143,8 @@ export function formatDoctorReport(input: DoctorReportInput): string {
     }`,
     `debug log: ${config.debug ? 'on (~/.pi/agent/logs/mistral-bridge/, redacted)' : 'off'}`,
     `timeouts: tool ${config.toolPreTimeoutMs} ms, abort ${config.abortWatchdogMs} ms, ` +
-      `discovery ${config.discoveryTimeoutMs} ms, idle ${config.processIdleTimeoutMs} ms`,
+      `discovery ${config.discoveryTimeoutMs} ms, startup ${config.startupDiscoveryTimeoutMs} ms, ` +
+      `idle ${config.processIdleTimeoutMs} ms, refresh ${config.modelRefreshIntervalMs} ms`,
     `node: ${input.nodeVersion}`,
     `discovery: ${formatDiscovery(input.discovery, now)}`,
     `models: ${input.models.length} registered`,
@@ -173,6 +179,28 @@ export function formatModelList(
   return lines.join('\n');
 }
 
+/**
+ * Terminal-safe diagnostics text. Config files, model names and discovery
+ * errors are untrusted input: escape sequences would be interpreted by a
+ * headless terminal, and an error message may echo an `Authorization` header.
+ */
+export function safeDiagnosticText(text: string): string {
+  // stripVTControlCharacters removes ANSI sequences; leftover C0/C1 control
+  // characters (BEL, backspace, …) are neutralized in a codepoint loop (a
+  // regex over that range trips no-control-regex) while tabs and newlines stay.
+  let clean = '';
+  for (const char of stripVTControlCharacters(text)) {
+    const code = char.codePointAt(0) ?? 0;
+    const printable =
+      char === '\n' ||
+      char === '\r' ||
+      char === '\t' ||
+      !(code < 0x20 || (code >= 0x7f && code <= 0x9f));
+    clean += printable ? char : '?';
+  }
+  return clean.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <redacted>');
+}
+
 /** Sends one command report on the channel Pi's mode provides. */
 function emit(
   ctx: Pick<ExtensionCommandContext, 'hasUI' | 'ui'>,
@@ -180,11 +208,12 @@ function emit(
   type: BridgeMessageType,
   write: (text: string) => void
 ): void {
+  const safe = safeDiagnosticText(text);
   if (ctx.hasUI) {
-    ctx.ui.notify(text, type);
+    ctx.ui.notify(safe, type);
     return;
   }
-  write(`${text}\n`);
+  write(`${safe}\n`);
 }
 
 /**
@@ -241,6 +270,10 @@ export function registerBridgeCommands(
         try {
           await catalog.discover();
         } catch (error) {
+          if (catalog.isDisposed) {
+            emit(ctx, 'the model catalog is disposed (session shutting down)', 'warning', write);
+            return;
+          }
           const message = error instanceof Error ? error.message : String(error);
           emit(ctx, `model discovery failed: ${message}`, 'error', write);
           return;

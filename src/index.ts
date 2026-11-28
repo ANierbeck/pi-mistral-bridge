@@ -267,7 +267,7 @@ function registerProviderWithStartup(
     config,
     cwd,
     spawnChild: deps.spawnChild,
-    onAnomaly: deps.onAnomaly,
+    onAnomaly: anomaly,
     logDir: deps.logDir,
     onModels: (models, aliasByApiId): void => {
       if (provider.isDisposed) return; // disposed during discovery: register nothing

@@ -394,6 +394,48 @@ describe('ModelCatalog background refresh (ADR-0007: aliases volatile, re-read t
     }
   });
 
+  it('does not record a failure for the abort caused by dispose()', async () => {
+    const fake = makeFakeSpawn({
+      modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
+    });
+    const { catalog } = makeCatalog(fake);
+    const pending = catalog.discover();
+    catalog.dispose();
+    await expect(pending).rejects.toBeTruthy();
+    expect(catalog.lastDiscovery).toBeNull();
+  });
+
+  it('keeps the previous state when publication throws, so the next discovery retries it', async () => {
+    const fake = makeFakeSpawn({
+      modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],
+    });
+    const published: string[][] = [];
+    let failNext = true;
+    const catalog = new ModelCatalog({
+      config: CONFIG,
+      cwd: CWD,
+      spawnChild: fake.spawnChild,
+      logDir: LOG_DIR,
+      onModels: (models): void => {
+        if (failNext) {
+          failNext = false;
+          throw new Error('registerProvider failed');
+        }
+        published.push(models.map((model) => model.id));
+      },
+    });
+    try {
+      await expect(catalog.discover()).rejects.toThrow(/registerProvider failed/);
+      expect(catalog.currentModels).toEqual([]); // nothing committed
+
+      await catalog.discover();
+      expect(published).toEqual([['api-id-one']]);
+      expect(catalog.currentModels.map((model) => model.id)).toEqual(['api-id-one']);
+    } finally {
+      catalog.dispose();
+    }
+  });
+
   it('an empty refresh result does not wipe a non-empty list', async () => {
     const fake = makeFakeSpawn({
       modelOptions: [{ value: 'alias-one', name: 'Model One', description: 'api-id-one' }],

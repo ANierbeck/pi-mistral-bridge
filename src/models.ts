@@ -371,6 +371,9 @@ export class ModelCatalog {
 
   /** Records one attempt for {@link lastDiscovery} (`error` null = success). */
   private recordDiscovery(error: unknown): void {
+    // A disposed catalog aborts its in-flight discovery on purpose (session
+    // shutdown); that is not a discovery failure and must not surface as one.
+    if (this.disposed) return;
     this.lastOutcome = {
       ok: error === null,
       at: Date.now(),
@@ -437,18 +440,30 @@ export class ModelCatalog {
   /** Installs a fresh discovery result and publishes when anything changed. */
   private applyDiscovered(discovered: DiscoveredModel[]): void {
     const before = this.fingerprint();
+    const nextModels = discovered.map((d) => this.toProviderModel(d));
+    const nextAliasByApiId = new Map(discovered.map((d) => [d.apiId, d.alias]));
+    if (JSON.stringify([nextModels, [...nextAliasByApiId]]) !== before) {
+      // Publish BEFORE committing: if onModels throws (registerProvider
+      // rejected the list), the catalog keeps the previous state, so the next
+      // discovery sees a changed fingerprint and retries the publication
+      // instead of leaving Pi with a list the catalog believes it published.
+      this.onModels?.(nextModels, nextAliasByApiId);
+    }
     this.entries = discovered;
-    this.aliasByApiId = new Map(discovered.map((d) => [d.apiId, d.alias]));
-    this.modelsValue = discovered.map((d) => this.toProviderModel(d));
-    if (this.fingerprint() !== before) this.onModels?.(this.modelsValue, this.aliasByApiId);
+    this.aliasByApiId = nextAliasByApiId;
+    this.modelsValue = nextModels;
   }
 
   /** Re-maps the current entries (capability cache changed) and publishes on change. */
   private republishIfChanged(): void {
     if (this.entries.length === 0) return;
     const before = this.fingerprint();
-    this.modelsValue = this.entries.map((d) => this.toProviderModel(d));
-    if (this.fingerprint() !== before) this.onModels?.(this.modelsValue, this.aliasByApiId);
+    const nextModels = this.entries.map((d) => this.toProviderModel(d));
+    if (JSON.stringify([nextModels, [...this.aliasByApiId]]) !== before) {
+      // Same publish-before-commit order as applyDiscovered.
+      this.onModels?.(nextModels, this.aliasByApiId);
+    }
+    this.modelsValue = nextModels;
   }
 
   private fingerprint(): string {
