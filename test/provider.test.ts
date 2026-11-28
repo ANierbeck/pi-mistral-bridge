@@ -3,7 +3,7 @@
 // fake ACP agent (test/helpers/fake-acp-agent.ts, AGENTS.md §4: no real
 // vibe-acp); the MCP side is the REAL loopback bridge with a real MCP client
 // playing Vibe's role (parallel tool calls arrive as one batch, ADR-0006).
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -161,6 +161,8 @@ interface ProviderHarness {
   anomalies: string[];
   bridge: () => McpBridge;
   bridgeCount: () => number;
+  /** Batches the bridge handed to the provider's batch handler so far. */
+  batchCount: () => number;
   mcpClient: () => Promise<Client>;
   prompts: () => Array<{ method: string; params: any }>;
   sessionNews: () => number;
@@ -183,6 +185,7 @@ function makeProvider(
   const anomalies: string[] = [];
   let bridge: McpBridge | null = null;
   let bridgeCount = 0;
+  let batchCount = 0;
   let client: Client | null = null;
   const provider = new MistralProvider({
     config: { ...CONFIG, ...configOverrides },
@@ -193,9 +196,16 @@ function makeProvider(
     logDir: LOG_DIR,
     createBridge: async (options: CreateMcpBridgeOptions) => {
       bridgeCount += 1;
-      bridge = await createMcpBridge({ batchWindowMs: 30, ...options });
-      bridges.push(bridge);
-      return bridge;
+      const created = await createMcpBridge({ batchWindowMs: 30, ...options });
+      const registerBatchHandler = created.onBatch.bind(created);
+      created.onBatch = (handler) =>
+        registerBatchHandler((calls) => {
+          batchCount += 1;
+          handler(calls);
+        });
+      bridge = created;
+      bridges.push(created);
+      return created;
     },
   });
   return {
@@ -207,6 +217,7 @@ function makeProvider(
       return bridge;
     },
     bridgeCount: () => bridgeCount,
+    batchCount: () => batchCount,
     mcpClient: async () => {
       if (!client) {
         const b = bridge!;
@@ -598,6 +609,412 @@ describe('MistralProvider.streamSimple: tool turn (park/resume, ADR-0002)', () =
       expect(second.message.content).toEqual([{ type: 'text', text: 'both done: A,B' }]);
       expect(h.sessionNews()).toBe(1);
       expect(h.prompts()).toHaveLength(1);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+});
+
+describe('MistralProvider.streamSimple: late MCP call waves while a batch is parked (ADR-0002)', () => {
+  /** A promise plus its resolver, to sequence the fake Vibe script against the test. */
+  function gate(): { opened: Promise<void>; open: () => void } {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return { opened, open };
+  }
+
+  const textOfResult = (r: unknown): string =>
+    (r as { content: Array<{ text?: string }> }).content[0]?.text ?? '';
+
+  it('queues a second wave that parks while batch A is with Pi and emits it as the next toolUse batch', async () => {
+    const secondWave = gate();
+    const h = makeProvider({
+      promptScript: async (params, agent) => {
+        const sessionId = params.sessionId;
+        await sendToolCallUpdate(agent, sessionId, 'effect-a', { text: 'a' });
+        const client = await h.mcpClient();
+        const a = client.callTool({ name: 'pi__echo', arguments: { text: 'a' } });
+        // Vibe issues the next call of the same step after the batch window
+        await secondWave.opened;
+        await sendToolCallUpdate(agent, sessionId, 'effect-b', { text: 'b' });
+        const b = client.callTool({ name: 'pi__echo', arguments: { text: 'b' } });
+        const results = await Promise.all([a, b]);
+        await sendUpdate(agent, sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `both done: ${results.map(textOfResult).join(',')}` },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('two waves')]), { sessionId: 'pi-1' })
+      );
+      expect(first.message.stopReason).toBe('toolUse');
+      const callsA = first.message.content.filter((b) => b.type === 'toolCall');
+      expect(callsA.map((c) => (c.type === 'toolCall' ? c.arguments : null))).toEqual([
+        { text: 'a' },
+      ]);
+      const idA = callsA[0].type === 'toolCall' ? callsA[0].id : '';
+
+      // the second wave reaches the provider while batch A is with Pi
+      secondWave.open();
+      await waitFor(() => h.batchCount() === 2, 'second-wave batch');
+      expect(h.anomalies).toEqual([]);
+
+      // delivering A's result surfaces B as the next batch on the new stream
+      const second = await collectStream(
+        h.provider.streamSimple(
+          MODEL,
+          contextOf([user('two waves'), first.message, toolResult(idA, 'echo', 'A')]),
+          { sessionId: 'pi-1' }
+        )
+      );
+      expect(second.types).toEqual(['start', 'toolcall_start', 'toolcall_end', 'done']);
+      expect(second.message.stopReason).toBe('toolUse');
+      const callsB = second.message.content.filter((b) => b.type === 'toolCall');
+      expect(callsB).toHaveLength(1);
+      const callB = callsB[0];
+      if (callB.type !== 'toolCall') throw new Error('unreachable');
+      expect(callB.name).toBe('echo');
+      expect(callB.arguments).toEqual({ text: 'b' });
+      expect(callB.id).not.toBe(idA);
+
+      // answering B lets the parked prompt finish; Vibe got both results
+      const third = await collectStream(
+        h.provider.streamSimple(
+          MODEL,
+          contextOf([
+            user('two waves'),
+            first.message,
+            toolResult(idA, 'echo', 'A'),
+            second.message,
+            toolResult(callB.id, 'echo', 'B'),
+          ]),
+          { sessionId: 'pi-1' }
+        )
+      );
+      expect(third.message.stopReason).toBe('stop');
+      expect(third.message.content).toEqual([{ type: 'text', text: 'both done: A,B' }]);
+      expect(h.sessionNews()).toBe(1);
+      expect(h.prompts()).toHaveLength(1);
+      expect(h.anomalies).toEqual([]);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('does not emit a queued late call the bridge already timed out; the turn continues normally', async () => {
+    const secondWave = gate();
+    const finish = gate();
+    let timedOut: boolean[] | null = null;
+    const h = makeProvider(
+      {
+        promptScript: async (params, agent) => {
+          const sessionId = params.sessionId;
+          const client = await h.mcpClient();
+          const a = client.callTool({ name: 'pi__echo', arguments: { text: 'a' } });
+          await secondWave.opened;
+          const b = client.callTool({ name: 'pi__echo', arguments: { text: 'b' } });
+          // Pi is slower than the pre-emptive timeout: both calls time out
+          const results = await Promise.all([a, b]);
+          timedOut = results.map((r) => (r as { isError?: boolean }).isError === true);
+          await finish.opened;
+          await sendUpdate(agent, sessionId, {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'after the timeouts' },
+          });
+          return { stopReason: 'end_turn' };
+        },
+      },
+      { toolPreTimeoutMs: 300 }
+    );
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('slow tools')]), { sessionId: 'pi-1' })
+      );
+      expect(first.message.stopReason).toBe('toolUse');
+      const callA = first.message.content.find((b) => b.type === 'toolCall');
+      if (callA?.type !== 'toolCall') throw new Error('no toolCall for A');
+
+      secondWave.open();
+      await waitFor(() => h.batchCount() === 2, 'second-wave batch');
+      expect(h.anomalies).toEqual([]);
+      await waitFor(() => timedOut !== null, 'both calls timed out');
+      expect(timedOut).toEqual([true, true]);
+
+      // Pi finally answers A: the timed-out late call B must not reach Pi
+      const deliverResults = vi.spyOn(h.bridge(), 'deliverResults');
+      const stream2 = h.provider.streamSimple(
+        MODEL,
+        contextOf([user('slow tools'), first.message, toolResult(callA.id, 'echo', 'A')]),
+        { sessionId: 'pi-1' }
+      );
+      await waitFor(() => deliverResults.mock.calls.length === 1, 'continue branch delivered');
+      finish.open();
+      const second = await collectStream(stream2);
+      expect(second.message.stopReason).toBe('stop');
+      expect(second.message.content).toEqual([{ type: 'text', text: 'after the timeouts' }]);
+      expect(h.sessionNews()).toBe(1);
+      expect(h.prompts()).toHaveLength(1);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('steering while a late call is queued: the queued call is released with the abandon error and never reaches the new stream (pin)', async () => {
+    const lateWave = gate();
+    let lateResult: { isError: boolean | undefined; text: string } | null = null;
+    const h = makeProvider({
+      promptScript: async (_params, _agent, fake) => {
+        // only the FIRST prompt parks; the steering rebuild prompt answers at once
+        if (fake.promptCount !== 1) return { stopReason: 'end_turn' };
+        const client = await h.mcpClient();
+        const a = client.callTool({ name: 'pi__echo', arguments: { text: 'a' } });
+        await lateWave.opened;
+        const b = (await client.callTool({ name: 'pi__echo', arguments: { text: 'b' } })) as {
+          isError?: boolean;
+          content: Array<{ text?: string }>;
+        };
+        lateResult = { isError: b.isError, text: textOfResult(b) };
+        await a;
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('two waves')]), { sessionId: 'pi-1' })
+      );
+      expect(first.message.stopReason).toBe('toolUse');
+
+      // B is queued on the parked prompt while batch A is with Pi
+      lateWave.open();
+      await waitFor(() => h.batchCount() === 2, 'late batch queued');
+      expect(h.anomalies).toEqual([]);
+
+      // steering instead of A's result: the rebuild abandons the parked prompt
+      const second = await collectStream(
+        h.provider.streamSimple(
+          MODEL,
+          contextOf([user('two waves'), first.message, user('forget it, do something else')]),
+          { sessionId: 'pi-1' }
+        )
+      );
+      expect(second.message.stopReason).toBe('stop');
+      // the queued call died with the old LiveTurn: nothing of it is emitted
+      expect(second.types).not.toContain('toolcall_start');
+      expect(second.message.content).toEqual([]);
+      await waitFor(() => lateResult !== null, 'late call released');
+      expect(lateResult).toEqual({
+        isError: true,
+        text: 'turn abandoned: steering or model switch (ADR-0003)',
+      });
+      expect(h.sessionNews()).toBe(2);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('emits only the still-pending call of a mixed late wave: a timed-out B is skipped, a pending C is emitted (pin)', async () => {
+    const gateB = gate();
+    const gateC = gate();
+    const finish = gate();
+    let bTimedOut = false;
+    const h = makeProvider(
+      {
+        promptScript: async (params, agent) => {
+          const client = await h.mcpClient();
+          const a = client.callTool({ name: 'pi__echo', arguments: { text: 'a' } });
+          await gateB.opened;
+          const b = client.callTool({ name: 'pi__echo', arguments: { text: 'b' } }).then((r) => {
+            bTimedOut = (r as { isError?: boolean }).isError === true;
+          });
+          await b;
+          await gateC.opened;
+          const c = client.callTool({ name: 'pi__echo', arguments: { text: 'c' } });
+          await finish.opened;
+          await Promise.all([a, c]);
+          await sendUpdate(agent, params.sessionId, {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'mixed wave done' },
+          });
+          return { stopReason: 'end_turn' };
+        },
+      },
+      { toolPreTimeoutMs: 300 }
+    );
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('mixed')]), { sessionId: 'pi-1' })
+      );
+      const callA = first.message.content.find((b) => b.type === 'toolCall');
+      if (callA?.type !== 'toolCall') throw new Error('no toolCall for A');
+
+      gateB.open();
+      await waitFor(() => h.batchCount() === 2, 'B queued');
+      await waitFor(() => bTimedOut, 'B timed out');
+      gateC.open();
+      await waitFor(() => h.batchCount() === 3, 'C queued');
+      expect(h.anomalies).toEqual([]);
+
+      const second = await collectStream(
+        h.provider.streamSimple(
+          MODEL,
+          contextOf([user('mixed'), first.message, toolResult(callA.id, 'echo', 'A')]),
+          { sessionId: 'pi-1' }
+        )
+      );
+      expect(second.message.stopReason).toBe('toolUse');
+      const emitted = second.message.content.filter((b) => b.type === 'toolCall');
+      expect(emitted.map((c) => (c.type === 'toolCall' ? c.arguments : null))).toEqual([
+        { text: 'c' },
+      ]);
+      finish.open();
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('emits two late waves that parked before Pi answered A as ONE batch, in arrival order (pin)', async () => {
+    const gateB = gate();
+    const gateC = gate();
+    const h = makeProvider({
+      promptScript: async (params, agent) => {
+        const client = await h.mcpClient();
+        const a = client.callTool({ name: 'pi__echo', arguments: { text: 'a' } });
+        await gateB.opened;
+        const b = client.callTool({ name: 'pi__echo', arguments: { text: 'b' } });
+        await gateC.opened;
+        const c = client.callTool({ name: 'pi__echo', arguments: { text: 'c' } });
+        const results = await Promise.all([a, b, c]);
+        await sendUpdate(agent, params.sessionId, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `all done: ${results.map(textOfResult).join(',')}` },
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('three waves')]), { sessionId: 'pi-1' })
+      );
+      const callA = first.message.content.find((b) => b.type === 'toolCall');
+      if (callA?.type !== 'toolCall') throw new Error('no toolCall for A');
+
+      gateB.open();
+      await waitFor(() => h.batchCount() === 2, 'B queued');
+      gateC.open();
+      await waitFor(() => h.batchCount() === 3, 'C queued');
+      expect(h.anomalies).toEqual([]);
+
+      const second = await collectStream(
+        h.provider.streamSimple(
+          MODEL,
+          contextOf([user('three waves'), first.message, toolResult(callA.id, 'echo', 'A')]),
+          { sessionId: 'pi-1' }
+        )
+      );
+      expect(second.types).toEqual([
+        'start',
+        'toolcall_start',
+        'toolcall_end',
+        'toolcall_start',
+        'toolcall_end',
+        'done',
+      ]);
+      const batch = second.message.content.filter((b) => b.type === 'toolCall');
+      expect(batch.map((c) => (c.type === 'toolCall' ? c.arguments : null))).toEqual([
+        { text: 'b' },
+        { text: 'c' },
+      ]);
+      const [callB, callC] = batch;
+      if (callB.type !== 'toolCall' || callC.type !== 'toolCall') throw new Error('unreachable');
+
+      const third = await collectStream(
+        h.provider.streamSimple(
+          MODEL,
+          contextOf([
+            user('three waves'),
+            first.message,
+            toolResult(callA.id, 'echo', 'A'),
+            second.message,
+            toolResult(callB.id, 'echo', 'B'),
+            toolResult(callC.id, 'echo', 'C'),
+          ]),
+          { sessionId: 'pi-1' }
+        )
+      );
+      expect(third.message.content).toEqual([{ type: 'text', text: 'all done: A,B,C' }]);
+      expect(h.prompts()).toHaveLength(1);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('refuses to emit a batch on an ended stream: reports an anomaly and leaves the delivered turn untouched (defensive invariant, reached through a cast)', async () => {
+    const h = makeProvider({
+      promptScript: async () => {
+        const client = await h.mcpClient();
+        await client.callTool({ name: 'pi__echo', arguments: { text: 'a' } });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('park')]), { sessionId: 'pi-1' })
+      );
+      expect(first.message.stopReason).toBe('toolUse');
+
+      // no public path hands emitBatch an ended turn (onBatch and the continue
+      // branch both pass an open one), so the private guard is called directly
+      const internals = h.provider as unknown as {
+        live: Map<string, { current: { ended: boolean; message: AssistantMessage } }>;
+        emitBatch(live: unknown, calls: unknown): void;
+      };
+      const [live] = [...internals.live.values()];
+      expect(live.current.ended).toBe(true);
+      const before = JSON.stringify(live.current.message);
+      internals.emitBatch(live, [{ callId: 'x', piToolName: 'echo', args: {} }]);
+      expect(h.anomalies).toEqual(['emitBatch on an ended stream — dropped']);
+      expect(JSON.stringify(live.current.message)).toBe(before);
+    } finally {
+      await h.provider.dispose();
+    }
+  });
+
+  it('keeps the anomaly + drop when the late wave cannot be attributed to exactly one parked prompt', async () => {
+    const lateWave = gate();
+    let promptCount = 0;
+    const h = makeProvider({
+      promptScript: async () => {
+        promptCount += 1;
+        const own = `parked-${promptCount}`;
+        const client = await h.mcpClient();
+        const calls = [client.callTool({ name: 'pi__echo', arguments: { text: own } })];
+        if (promptCount === 1) {
+          await lateWave.opened;
+          calls.push(client.callTool({ name: 'pi__echo', arguments: { text: 'late' } }));
+        }
+        await Promise.all(calls);
+        return { stopReason: 'end_turn' };
+      },
+    });
+    try {
+      // two Pi sessions, each with a parked batch: a late call is ambiguous
+      const first = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('one')]), { sessionId: 'pi-1' })
+      );
+      const second = await collectStream(
+        h.provider.streamSimple(MODEL, contextOf([user('two')]), { sessionId: 'pi-2' })
+      );
+      expect(first.message.stopReason).toBe('toolUse');
+      expect(second.message.stopReason).toBe('toolUse');
+
+      lateWave.open();
+      await waitFor(() => h.batchCount() === 3, 'late batch');
+      expect(h.anomalies).toEqual(['MCP batch of 1 call(s) with no running ACP prompt — dropped']);
     } finally {
       await h.provider.dispose();
     }
@@ -1477,6 +1894,37 @@ describe('MistralProvider: resource creation races (one bridge/pool, dispose dur
       expect(bridgeClosed).toBe(true);
       // no vibe-acp child was spawned for the disposed provider
       expect(fake.spawns).toHaveLength(0);
+    } finally {
+      await provider.dispose();
+    }
+  });
+});
+
+describe('MistralProvider: per-process debug log files (AGENTS.md §15)', () => {
+  it('writes the bridge log to mcp-bridge-<pid>.jsonl and the pool log to vibe-acp-<alias>-<pid>-<n>.jsonl', async () => {
+    const fake = makeFakeSpawn({ promptScript: textTurnScript });
+    const logDir = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-provider-debug-logs-'));
+    const provider = new MistralProvider({
+      config: { ...CONFIG, debug: true },
+      cwd: CWD,
+      aliasByApiId: ALIAS_BY_API_ID,
+      spawnChild: fake.spawnChild,
+      onAnomaly: () => {},
+      logDir,
+      createBridge: async (options: CreateMcpBridgeOptions) => {
+        const bridge = await createMcpBridge({ batchWindowMs: 30, ...options });
+        bridges.push(bridge);
+        return bridge;
+      },
+    });
+    try {
+      await collectStream(
+        provider.streamSimple(MODEL, contextOf([user('hi')]), { sessionId: 'pi-1' })
+      );
+      expect(readdirSync(logDir).sort()).toEqual([
+        `mcp-bridge-${process.pid}.jsonl`,
+        `vibe-acp-devstral-small-${process.pid}-1.jsonl`,
+      ]);
     } finally {
       await provider.dispose();
     }

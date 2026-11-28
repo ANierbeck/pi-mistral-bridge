@@ -5,7 +5,7 @@
 // registry), and the alias map that routes provider.streamSimple to the
 // per-alias process pool (ADR-0007). The ACP side is the shared in-process
 // fake ACP agent (no real vibe-acp, AGENTS.md §4).
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -139,6 +139,18 @@ describe('ModelCatalog.discover: model list from the ACP model config option (AD
       expect(fake.spawns[0].env[VIBE_ENV.ACTIVE_MODEL]).toBeUndefined();
       expect(fake.spawns[0].env[VIBE_ENV.MCP_SERVERS]).toBeUndefined();
       expect(fake.children[0].killedWith.length).toBeGreaterThan(0);
+    } finally {
+      catalog.dispose();
+    }
+  });
+
+  it('writes its debug log to model-discovery-<pid>.jsonl so Pi processes never share a file', async () => {
+    const fake = makeFakeSpawn();
+    const logDir = mkdtempSync(join(tmpdir(), 'pi-mistral-bridge-models-debug-logs-'));
+    const { catalog } = makeCatalog(fake, { config: { ...CONFIG, debug: true }, logDir });
+    try {
+      await catalog.discover();
+      expect(readdirSync(logDir)).toEqual([`model-discovery-${process.pid}.jsonl`]);
     } finally {
       catalog.dispose();
     }

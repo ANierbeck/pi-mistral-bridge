@@ -13,7 +13,9 @@
  *   - `rebuild` → new ACP session, prompt = system prompt + HISTORY_PREAMBLE + renderTranscript;
  *   - `delta` → same ACP session, prompt = renderDelta of the new messages;
  *   - `continueToolResults` → `mcpBridge.deliverResults` for the parked batch,
- *     keep consuming the SAME still-running ACP prompt.
+ *     keep consuming the SAME still-running ACP prompt; MCP calls of a later
+ *     wave that arrived while the batch was with Pi are emitted right away
+ *     as the next batch (unless the bridge already answered them).
  * - While Vibe streams: text/thinking deltas become Pi events; when the bridge
  *   emits a batch, the calls become Pi `toolCall` blocks (bridge callId as the
  *   tool-call id, `pi__` prefix stripped, parsed args) and the stream ends with
@@ -59,6 +61,7 @@ import {
   AcpClientError,
   classifyAcpError,
   VibeProcessPool,
+  debugLogFileName,
   defaultDebugLogDir,
   type AcpPrompt,
   type AcpSession,
@@ -163,6 +166,12 @@ interface LiveTurn {
    * ended turn is never mutated.
    */
   pendingEvents: AcpSessionEvent[];
+  /**
+   * MCP calls of a later wave that reached the bridge's batch handler while
+   * `current` was already parked on a batch: emitted as the next batch by the
+   * continue branch once the parked batch's results are delivered.
+   */
+  lateCalls: ParkedCall[];
 }
 
 /** Upper bound for awaiting Pi's `onResponse` before the terminal error event. */
@@ -359,7 +368,7 @@ export class MistralProvider {
     const logger = config.debug
       ? (line: string): void => {
           mkdirSync(logDir, { recursive: true });
-          appendFileSync(join(logDir, 'mcp-bridge.jsonl'), `${line}\n`);
+          appendFileSync(join(logDir, debugLogFileName('mcp-bridge')), `${line}\n`);
         }
       : undefined;
     const createBridge = this.options.createBridge ?? createMcpBridge;
@@ -523,6 +532,11 @@ export class MistralProvider {
       // hash, so callIds stay unique; repeats INSIDE one round still de-dup.
       // This also bounds the resolvedCache (no per-result retention forever).
       bridge.newTurn();
+      // a later wave of the same model step that arrived while the old turn
+      // was parked becomes the next batch; calls the bridge no longer holds
+      // (timed out or released) are skipped, their result would be discarded
+      const lateCalls = live.lateCalls.splice(0).filter((call) => bridge.isPending(call.callId));
+      if (lateCalls.length > 0) this.emitBatch(live, lateCalls);
       return; // the existing consume loop finishes this stream
     }
 
@@ -631,6 +645,7 @@ export class MistralProvider {
       contextMessages,
       options,
       pendingEvents: [],
+      lateCalls: [],
     };
     this.live.set(key, live);
     stream.push({ type: 'start', partial: turnStream.message });
@@ -827,22 +842,51 @@ export class MistralProvider {
   // ------------------------------------------------------------ batch (park)
 
   /**
-   * A batch of parked MCP calls: emit Pi toolCall blocks and end the current
-   * stream with `toolUse` — the ACP prompt stays parked until the next
-   * `streamSimple` delivers the toolResults (ADR-0002).
+   * A batch of parked MCP calls. A running prompt with an open stream takes
+   * it: Pi toolCall blocks, stream ends with `toolUse`, the ACP prompt stays
+   * parked until the next `streamSimple` delivers the toolResults (ADR-0002).
+   * A later wave of the same model step (it arrived after the batch window,
+   * while the batch is with Pi) is queued on the one parked prompt and
+   * emitted by the continue branch. Otherwise the batch is dropped.
    */
   private onBatch(calls: readonly ParkedCall[]): void {
     const live = [...this.live.values()].find((l) => !l.prompt.isSettled && !l.current.ended);
-    if (!live) {
-      // No running prompt to attach the batch to (e.g. a late call after the
-      // batch was already emitted and answered, or after a steering rebuild
-      // released the parked calls). The calls stay parked in the bridge and
-      // are answered by the pre-emptive tool timeout (toolPreTimeoutMs, ~55 s
-      // against Vibe's 60 s per-turn budget, ADR-0006) — never left hanging.
-      this.anomaly(`MCP batch of ${calls.length} call(s) with no running ACP prompt — dropped`);
+    if (live) {
+      this.emitBatch(live, calls);
       return;
     }
+    // MCP calls carry no ACP session id, so a late wave is attributed only
+    // when exactly one prompt is parked on a batch
+    const parked = [...this.live.values()].filter(
+      (l) =>
+        !l.prompt.isSettled &&
+        l.current.ended &&
+        l.state.pendingToolBatch !== null &&
+        l.state.pendingToolBatch.length > 0
+    );
+    if (parked.length === 1) {
+      parked[0].lateCalls.push(...calls);
+      return;
+    }
+    // No running prompt to attach the batch to (e.g. a late call after the
+    // prompt settled, after a steering rebuild released the parked calls, or
+    // with several parked prompts). The calls stay parked in the bridge and
+    // are answered by the pre-emptive tool timeout (toolPreTimeoutMs, ~55 s
+    // against Vibe's 60 s per-turn budget, ADR-0006) — never left hanging.
+    this.anomaly(`MCP batch of ${calls.length} call(s) with no running ACP prompt — dropped`);
+  }
+
+  /**
+   * Emits parked MCP calls as Pi toolCall blocks on the live turn's open
+   * stream and ends it with `toolUse` (the ACP prompt stays parked). The
+   * turn's stream must still be open; an ended one is never touched.
+   */
+  private emitBatch(live: LiveTurn, calls: readonly ParkedCall[]): void {
     const turn = live.current;
+    if (turn.ended) {
+      this.anomaly('emitBatch on an ended stream — dropped');
+      return;
+    }
     this.closeText(live);
     this.closeThinking(live);
     live.state.pendingToolBatch = calls;

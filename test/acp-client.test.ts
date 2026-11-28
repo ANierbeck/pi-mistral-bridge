@@ -16,6 +16,7 @@ import {
   VibeProcessPool,
   bridgeToolRequestName,
   classifyAcpError,
+  debugLogFileName,
   extractModelOptions,
   isBridgeToolName,
   type AcpPrompt,
@@ -1047,6 +1048,23 @@ describe('debug log (AGENTS.md §15)', () => {
       expect(content).not.toContain(MCP_SERVER.token);
       expect(content).not.toMatch(/Bearer\s+[A-Za-z0-9._~+/=-]{8,}/);
       expect(content).toContain('Bearer <redacted>');
+    } finally {
+      await h.pool.dispose();
+    }
+  });
+
+  it('debugLogFileName appends the process id: <base>-<pid>.jsonl, default process.pid', () => {
+    expect(debugLogFileName('mcp-bridge', 4242)).toBe('mcp-bridge-4242.jsonl');
+    expect(debugLogFileName('model-discovery')).toBe(`model-discovery-${process.pid}.jsonl`);
+  });
+
+  it('names pool log files vibe-acp-<alias>-<pid>-<n>.jsonl so Pi processes never share a file', async () => {
+    const h = makePool({ debug: true, promptScript: defaultPromptScript });
+    try {
+      const proc = await h.pool.get('devstral-small');
+      const session = await proc.newSession({ cwd: CWD, mcpServer: MCP_SERVER });
+      await collect(session.prompt('log me'));
+      expect(readdirSync(h.logDir)).toEqual([`vibe-acp-devstral-small-${process.pid}-1.jsonl`]);
     } finally {
       await h.pool.dispose();
     }

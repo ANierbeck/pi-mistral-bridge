@@ -145,6 +145,21 @@ export function defaultDebugLogDir(): string {
   return join(homedir(), ...DEBUG_LOG_DIR_PARTS);
 }
 
+/**
+ * Debug log file name `<base>-<pid>[-<sequence>].jsonl`. The process id keeps
+ * concurrent Pi processes (main session, subagents) out of each other's files;
+ * a shared file interleaves their JSON-RPC ids and turn counters. The optional
+ * sequence numbers several files of one process with the same base (the pool's
+ * spawn counter).
+ */
+export function debugLogFileName(
+  base: string,
+  pid: number = process.pid,
+  sequence?: number
+): string {
+  return sequence === undefined ? `${base}-${pid}.jsonl` : `${base}-${pid}-${sequence}.jsonl`;
+}
+
 const REDACTED = '<redacted>';
 const BEARER_RE = /Bearer\s+[A-Za-z0-9._~+/=-]+/g;
 
@@ -158,11 +173,11 @@ export class AcpDebugLog {
 
   constructor(
     dir: string,
-    fileBase: string,
+    fileName: string,
     private readonly secrets: string[]
   ) {
     mkdirSync(dir, { recursive: true });
-    this.path = join(dir, `${fileBase}.jsonl`);
+    this.path = join(dir, fileName);
   }
 
   /** Synchronous append: a crash must not lose already-logged lines. */
@@ -751,7 +766,10 @@ export interface VibeAcpProcessOptions {
   logDir: string;
   spawnChild?: SpawnChildFn | undefined;
   onAnomaly?: ((message: string) => void) | undefined;
+  /** Debug log file base, named per process by {@link debugLogFileName}. */
   logFileBase: string;
+  /** Optional per-process sequence number of the debug log file (pool spawn counter). */
+  logFileSequence?: number | undefined;
   /**
    * Abort hook: when the signal fires, the child is killed immediately (even
    * mid-`initialize`), which unblocks every pending ACP request through the
@@ -864,7 +882,7 @@ export class VibeAcpProcess {
       const debugLog = options.debug
         ? new AcpDebugLog(
             options.logDir,
-            options.logFileBase,
+            debugLogFileName(options.logFileBase, process.pid, options.logFileSequence),
             options.mcpServer ? [options.mcpServer.token] : []
           )
         : null;
@@ -1217,7 +1235,8 @@ export class VibeProcessPool {
       spawnChild: this.options.spawnChild,
       onAnomaly: this.options.onAnomaly,
       permissionHandler: this.options.permissionHandler,
-      logFileBase: `vibe-acp-${sanitizeFileBase(key)}-${++this.spawnCounter}`,
+      logFileBase: `vibe-acp-${sanitizeFileBase(key)}`,
+      logFileSequence: ++this.spawnCounter,
     });
     this.pending.set(key, p);
     const cleanup = (): void => {
