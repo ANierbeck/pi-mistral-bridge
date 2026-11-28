@@ -30,6 +30,8 @@
  *   session marked dirty, `stopReason: "aborted"` → next call rebuilds.
  * - Usage comes from the ACP side incl. cacheRead; cost is forced to 0
  *   (ADR-0003).
+ * - A quota failure is reported to Pi through the `onResponse` stream option
+ *   (status 429, empty headers, bounded wait) before the terminal error event.
  */
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -152,6 +154,8 @@ interface LiveTurn {
   current: TurnStream;
   /** The context messages of the current call (for recordSentPrefix). */
   contextMessages: readonly Message[];
+  /** The stream options of the current call (`onResponse` rate-limit report). */
+  options: SimpleStreamOptions | undefined;
   /**
    * Raw ACP events that arrived while `current` was already ended (parked):
    * they belong to the still-running prompt and are replayed into the next
@@ -160,6 +164,9 @@ interface LiveTurn {
    */
   pendingEvents: AcpSessionEvent[];
 }
+
+/** Upper bound for awaiting Pi's `onResponse` before the terminal error event. */
+const ON_RESPONSE_WAIT_MS = 1_000;
 
 function zeroUsage(): Usage {
   return {
@@ -454,7 +461,7 @@ export class MistralProvider {
       decision,
     }).catch((error: unknown) => {
       // last resort: never leave a returned stream open
-      this.endWithError(stream, state, model, error);
+      void this.endWithError(stream, state, model, options, error);
     });
     return stream;
   }
@@ -499,6 +506,7 @@ export class MistralProvider {
       const turnStream = this.newTurnStream(stream, model);
       live.current = turnStream;
       live.contextMessages = context.messages;
+      live.options = options;
       stream.push({ type: 'start', partial: turnStream.message });
       // replay the events that arrived while the old turn was already parked:
       // they belong to this still-running prompt and must land in the new
@@ -527,7 +535,7 @@ export class MistralProvider {
         // same ACP session, only the new message(s) as the next prompt
         const input = renderDelta(decision.newMessages);
         const prompt = live.session.prompt(input);
-        this.startTurn(key, state, live.session, prompt, context.messages, stream, model, signal);
+        this.startTurn(key, state, live.session, prompt, context.messages, stream, model, options);
         return;
       }
       // no usable live session (should not happen after decideFlow): rebuild
@@ -598,7 +606,7 @@ export class MistralProvider {
       await session.close().catch(() => {});
       throw error;
     }
-    this.startTurn(key, state, session, prompt, context.messages, stream, model, options?.signal);
+    this.startTurn(key, state, session, prompt, context.messages, stream, model, options);
   }
 
   /** Registers a new (prompt, stream) pair on a live turn and starts its consume loop. */
@@ -610,7 +618,7 @@ export class MistralProvider {
     contextMessages: readonly Message[],
     stream: AssistantMessageEventStream,
     model: Model<Api>,
-    signal: AbortSignal | undefined
+    options: SimpleStreamOptions | undefined
   ): void {
     const turnStream = this.newTurnStream(stream, model);
     const live: LiveTurn = {
@@ -621,11 +629,12 @@ export class MistralProvider {
       aborted: false,
       current: turnStream,
       contextMessages,
+      options,
       pendingEvents: [],
     };
     this.live.set(key, live);
     stream.push({ type: 'start', partial: turnStream.message });
-    this.attachAbort(live, state, signal);
+    this.attachAbort(live, state, options?.signal);
     void this.consumeLoop(live, model).catch((error: unknown) => {
       // last resort: consumeLoop already handles per-prompt errors; a throw
       // from emit/finishTurn must never become an unhandled rejection nor
@@ -693,6 +702,11 @@ export class MistralProvider {
       // dead-turn corrective retry (ADR-0010) below, so comparing prompts
       // would not identify a stale loop.
       if (this.live.get(live.key) !== live) return;
+      if (failure !== null) {
+        failure = await this.reportRateLimitBeforeEnd(live, model, failure);
+        // dispose()/a replacing turn may have run while the callback was awaited
+        if (this.live.get(live.key) !== live) return;
+      }
       if (!this.finishTurn(live, model, outcome, failure)) return;
       // Dead turn (ADR-0010): finishTurn asked for the one corrective prompt
       try {
@@ -700,7 +714,12 @@ export class MistralProvider {
       } catch (error) {
         // sending the corrective prompt failed: end the turn like any prompt
         // failure
-        this.finishTurn(live, model, null, error);
+        const classified = await this.reportRateLimitBeforeEnd(live, model, error);
+        // dispose()/a replacing turn may have run while the callback was awaited
+        // (a quota error is not expected from a synchronous prompt() throw, the
+        // guard keeps this path symmetric with the main one)
+        if (this.live.get(live.key) !== live) return;
+        this.finishTurn(live, model, null, classified);
         return;
       }
     }
@@ -869,9 +888,11 @@ export class MistralProvider {
 
     if (failure !== null) {
       const error = failure instanceof AcpClientError ? failure : classifyAcpError(failure);
-      if (error.kind === 'aborted' || error.kind === 'crashed') state.dirty = true;
+      if (error.kind === 'aborted' || error.kind === 'crashed' || live.aborted) state.dirty = true;
       if (!turn.ended) {
-        if (error.kind === 'aborted') {
+        // Pi's abort contract wins over a failure that settled after the abort
+        // (e.g. a quota error while the onResponse report was awaited)
+        if (error.kind === 'aborted' || live.aborted) {
           this.endAborted(turn.stream, state, turn.message, error.message);
           turn.ended = true; // a later dispose() must not end (and rewrite) it again
         } else {
@@ -1005,19 +1026,71 @@ export class MistralProvider {
   }
 
   /** Last-resort terminal error for a stream whose turn crashed before start. */
-  private endWithError(
+  private async endWithError(
     stream: AssistantMessageEventStream,
     state: SessionState,
     model: Model<Api>,
+    options: SimpleStreamOptions | undefined,
     error: unknown
-  ): void {
+  ): Promise<void> {
     state.dirty = true;
     const classified = error instanceof AcpClientError ? error : classifyAcpError(error);
+    await this.reportRateLimit(options, model, classified);
     const message = newAssistantMessage(model);
     message.stopReason = 'error';
     message.errorMessage = classified.message;
     stream.push({ type: 'error', reason: 'error', error: message });
     stream.end();
+  }
+
+  /**
+   * Classifies a prompt failure and, while the current turn is still open,
+   * reports a quota failure to Pi (see {@link reportRateLimit}) before the
+   * terminal error event. A turn that already ended (parked / disposed) has no
+   * terminal event to precede, so nothing is reported. Returns the classified
+   * error for finishTurn.
+   */
+  private async reportRateLimitBeforeEnd(
+    live: LiveTurn,
+    model: Model<Api>,
+    failure: unknown
+  ): Promise<AcpClientError> {
+    const error = failure instanceof AcpClientError ? failure : classifyAcpError(failure);
+    if (!live.current.ended && !live.aborted)
+      await this.reportRateLimit(live.options, model, error);
+    return error;
+  }
+
+  /**
+   * Reports a Vibe rate limit through Pi's `onResponse` stream option (the
+   * dynamic router reads limits from the response): status 429 with EMPTY
+   * headers — Vibe exposes no reset time, so no `retry-after` is invented and
+   * no upstream header is forwarded. Called once per failed attempt, before
+   * the terminal error event. A throwing or rejecting callback never changes
+   * the stream's outcome, and the wait is bounded so a hanging callback cannot
+   * keep the stream open.
+   */
+  private async reportRateLimit(
+    options: SimpleStreamOptions | undefined,
+    model: Model<Api>,
+    error: AcpClientError
+  ): Promise<void> {
+    if (error.kind !== 'quota') return;
+    if (typeof options?.onResponse !== 'function') return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const pending = Promise.resolve(options.onResponse({ status: 429, headers: {} }, model));
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ON_RESPONSE_WAIT_MS);
+      });
+      await Promise.race([pending, timeout]);
+    } catch (callbackError) {
+      this.anomaly(
+        `onResponse callback failed: ${callbackError instanceof Error ? callbackError.name : typeof callbackError}`
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private anomaly(message: string): void {
