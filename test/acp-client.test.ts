@@ -31,6 +31,7 @@ import {
   TOOL_CALL_META_TOOL_NAME,
   UNIFIED_HARNESS_DISCOVERY_TOOL,
   VIBE_ENV,
+  VIBE_RATE_LIMIT_ERROR_CODE,
   buildAcpMcpServerEntry,
 } from '../src/vibe-protocol.ts';
 import {
@@ -868,6 +869,40 @@ describe('error classification', () => {
     const other = classifyAcpError(new Error('boom'));
     expect(other.kind).toBe('protocol');
     expect(other.message).toContain('boom');
+  });
+
+  it("classifies Vibe's rate-limit error code as quota even when the wording matches no regex", () => {
+    const limited = classifyAcpError(
+      new acp.RequestError(VIBE_RATE_LIMIT_ERROR_CODE, 'Slow down, please')
+    );
+    expect(limited.kind).toBe('quota');
+    expect(limited.message).toBe(`${QUOTA_ERROR_PREFIX}: Slow down, please`);
+
+    // the same wording without the code stays a plain protocol error
+    const plain = classifyAcpError(new acp.RequestError(-32000, 'Slow down, please'));
+    expect(plain.kind).toBe('protocol');
+    expect(plain.message).toBe('Slow down, please');
+  });
+
+  it('surfaces a rate-limit error code from a failing prompt as quota', async () => {
+    const h = makePool({
+      promptScript: async () => {
+        throw new acp.RequestError(VIBE_RATE_LIMIT_ERROR_CODE, 'Slow down, please', {
+          provider: 'mistral',
+          model: 'devstral-small',
+        });
+      },
+    });
+    try {
+      const proc = await h.pool.get('devstral-small');
+      const session = await proc.newSession({ cwd: CWD, mcpServer: MCP_SERVER });
+      await expect(session.prompt('go').result()).rejects.toMatchObject({
+        kind: 'quota',
+        message: `${QUOTA_ERROR_PREFIX}: Slow down, please`,
+      });
+    } finally {
+      await h.pool.dispose();
+    }
   });
 
   it('surfaces quota errors from a failing prompt with the stable prefix', async () => {

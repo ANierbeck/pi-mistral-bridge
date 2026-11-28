@@ -38,6 +38,7 @@ import {
   USAGE_UPDATE_META,
   VIBE_ENV,
   VIBE_EVIDENCE_FILE,
+  VIBE_RATE_LIMIT_ERROR_CODE,
   VIBE_VERSION_VERIFIED,
 } from '../src/vibe-protocol.ts';
 
@@ -187,6 +188,10 @@ describe('Vibe-specific ACP _meta / extension surfaces (pinned literals)', () =>
   it('pins the only permission options the bridge may answer', () => {
     expect(PERMISSION_OPTION_ALLOW_ONCE).toBe('allow_once');
     expect(PERMISSION_OPTION_REJECT_ONCE).toBe('reject_once');
+  });
+
+  it('pins the ACP error code Vibe answers a rate limit with (vibe/acp/exceptions.py RATE_LIMITED)', () => {
+    expect(VIBE_RATE_LIMIT_ERROR_CODE).toBe(-31001);
   });
 
   it('pins the unified-harness discovery pseudo-tool that is not a Pi tool', () => {
