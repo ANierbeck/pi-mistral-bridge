@@ -49,7 +49,9 @@ Semantic Versioning.
   markers with no real tool call) is now recognised as a dead turn: the
   bridge sends its one corrective prompt (ADR-0010) and, if it happens
   again, ends the turn as an error instead of stopping silently with
-  fabricated tool output. Seen after compactions on a large model.
+  fabricated tool output. Seen after compactions on a large model. A
+  tool-less answer that quotes such a marker at the start of a line costs one
+  corrective turn (ADR-0012).
 
 ## 0.1.3 - 2026-11-27
 
