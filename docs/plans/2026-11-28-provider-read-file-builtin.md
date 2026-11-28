@@ -1,11 +1,7 @@
 # Provider mode: enable Vibe's read-only `read_file` builtin
 
-- **Status:** in progress — 2026-11-28: T1–T5 and T7 done; the T6 script
-  `spikes/read-file-builtin.ts` is written but has not been run. Approved
-  2026-11-28 (owner decisions in chat: fixed set, no
-  configuration; `read_file` only, because `grep` does not exist on the 3.1.4
-  unified harness; flagged reads are rejected). [ADR-0011](../adr/0011-provider-mode-read-file-builtin.md) accepted
-  2026-11-28; the owner approved the paid T6 run (at most 2 prompts).
+- **Status:** done — 2026-11-28 (ADR-0011 accepted; T1 red-first, T3/T4 pins;
+  paid check T6 passed on `devstral-small`, 1 of 2 prompts used; gates green)
 - **Problem:** In provider mode every Vibe builtin is denied by policy
   (ADR-0006). Models still call them: in the owner's logs 149 `read_file`
   attempts failed with `tool_denied`, and each failure costs a model step.
@@ -50,10 +46,22 @@
   the `mapUpdate` provider-path comment, AGENTS.md §15 (one exception:
   `read_file`, ADR-0011), README provider-mode tool section, CHANGELOG
   `## Unreleased` (Changed).
-- [ ] T6 (owner-gated, paid) — only with the owner's explicit go for this
+- [x] T6 (owner-gated, paid) — only with the owner's explicit go for this
   run: `MISTRAL_BRIDGE_IT=1`, one prompt on one model, asking the model to
   read a synthetic file in a temp cwd with Vibe's `read_file`. Pass when
   the `tool_call_update` is `completed` without a permission request.
   Budget: at most 2 prompts. Script: `spikes/read-file-builtin.ts`.
 - [x] T7 — gates as in AGENTS.md §4 plus `npm run test:coverage` and
   `npm run build`.
+
+## T6 result (paid, owner-approved, 2026-11-28)
+
+`MISTRAL_BRIDGE_IT=1 npx tsx spikes/read-file-builtin.ts devstral-small`,
+`vibe-acp` 3.1.4, bridge env (no MCP server attached), synthetic `note.txt`
+in a temp cwd. One prompt. Result: one builtin tool call with wire
+`_meta.tool_name` `read_file` ended `completed` (no error code), zero
+`session/request_permission` requests, the reply contained the synthetic
+content, `stopReason: end_turn`, session workspace trust `untrusted`.
+So an ordinary read runs without a client round trip, as ADR-0011 predicts.
+Not covered: a flagged read (covered by the T3 pin only) and reads outside the
+session cwd.
